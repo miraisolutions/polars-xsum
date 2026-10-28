@@ -16,7 +16,7 @@
 //!
 //! # Special values
 //!
-//! * Any NaN summand gives NaN.
+//! * Any NaN summand gives NaN: the first one, with its payload.
 //! * Infinities of both signs give NaN.
 //! * Otherwise an infinite summand gives that infinity.
 //! * A finite exact sum beyond the range of the result type gives `±∞`.

@@ -7,7 +7,7 @@
 //! so many summands can be added before carries must be propagated. Carry
 //! propagation normalises every digit except the topmost one into `[0, 2^32)`.
 
-use crate::ieee::{Decomposed, EXP_SPECIAL, MANTISSA_BITS, MANTISSA_MASK, is_special};
+use crate::ieee::{Decomposed, EXP_SPECIAL, MANTISSA_BITS, MANTISSA_MASK, SIGN_BIT, is_special};
 use crate::round::{Rounding, round_digits};
 
 /// Bits per digit, i.e. the base of the digit representation is `2^DIGIT_BITS`.
@@ -40,47 +40,65 @@ const _: () = {
 };
 
 /// Accumulated infinities and NaNs, which are kept apart from the finite sum.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Special {
-    /// No infinity or NaN has been added.
-    #[default]
-    None,
-    /// Only infinities of a single sign (given as bit pattern) have been added.
-    Infinity(u64),
-    /// The result is NaN: a NaN was added (its bit pattern is kept), or
-    /// infinities of both signs were added.
-    NaN(u64),
+///
+/// [`combine`](Self::combine) is associative, so the result does not depend on
+/// how partial sums are grouped when they are merged (e.g. by rayon).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Special {
+    /// Bit pattern of the first NaN added, if any.
+    first_nan: Option<u64>,
+    /// Whether `+∞` has been added.
+    positive_infinity: bool,
+    /// Whether `−∞` has been added.
+    negative_infinity: bool,
 }
 
 impl Special {
+    /// No infinity or NaN has been added.
+    pub(crate) const NONE: Self = Self {
+        first_nan: None,
+        positive_infinity: false,
+        negative_infinity: false,
+    };
+
     /// Records the bit pattern of an infinity or NaN.
     #[must_use]
     pub(crate) fn absorb(self, bits: u64) -> Self {
         debug_assert!(is_special(bits));
-        let is_nan = bits & MANTISSA_MASK != 0;
-        match self {
-            Self::NaN(_) => self,
-            _ if is_nan => Self::NaN(bits),
-            Self::None => Self::Infinity(bits),
-            Self::Infinity(inf) if inf == bits => self,
-            Self::Infinity(_) => Self::NaN(f64::NAN.to_bits()),
+        let mut out = self;
+        if bits & MANTISSA_MASK != 0 {
+            out.first_nan = out.first_nan.or(Some(bits));
+        } else if bits & SIGN_BIT != 0 {
+            out.negative_infinity = true;
+        } else {
+            out.positive_infinity = true;
         }
+        out
     }
 
-    /// Combines the specials of two partial sums.
+    /// Combines the specials of two partial sums, `self` coming first.
     #[must_use]
     pub(crate) fn combine(self, other: Self) -> Self {
-        match other {
-            Self::None => self,
-            Self::Infinity(bits) | Self::NaN(bits) => self.absorb(bits),
+        Self {
+            first_nan: self.first_nan.or(other.first_nan),
+            positive_infinity: self.positive_infinity || other.positive_infinity,
+            negative_infinity: self.negative_infinity || other.negative_infinity,
         }
     }
 
     /// The overall result if it is an infinity or NaN.
+    ///
+    /// The first NaN wins (keeping its payload). Without NaNs, infinities of
+    /// both signs give the default NaN.
     pub(crate) fn value(self) -> Option<f64> {
-        match self {
-            Self::None => None,
-            Self::Infinity(bits) | Self::NaN(bits) => Some(f64::from_bits(bits)),
+        if let Some(bits) = self.first_nan {
+            return Some(f64::from_bits(bits));
+        }
+        match (self.positive_infinity, self.negative_infinity) {
+            (true, true) => Some(f64::NAN),
+            (true, false) => Some(f64::INFINITY),
+            (false, true) => Some(f64::NEG_INFINITY),
+            (false, false) => None,
         }
     }
 }
@@ -148,7 +166,7 @@ impl SmallAccumulator {
         Self {
             digits: [0; NUM_DIGITS],
             adds_until_propagate: ADDS_BETWEEN_PROPAGATIONS,
-            special: Special::None,
+            special: Special::NONE,
         }
     }
 
@@ -407,21 +425,64 @@ mod tests {
         let pos = f64::INFINITY.to_bits();
         let neg = f64::NEG_INFINITY.to_bits();
         let nan = f64::NAN.to_bits() | 0x1234;
-        assert_eq!(Special::None.absorb(pos), Special::Infinity(pos));
-        assert_eq!(Special::Infinity(pos).absorb(pos), Special::Infinity(pos));
-        assert!(matches!(
-            Special::Infinity(pos).absorb(neg),
-            Special::NaN(_)
-        ));
-        assert_eq!(Special::Infinity(pos).absorb(nan), Special::NaN(nan));
-        assert_eq!(Special::NaN(nan).absorb(pos), Special::NaN(nan));
+        let other_nan = f64::NAN.to_bits() | 0x5678;
+        let value = |s: Special| s.value().map(f64::to_bits);
+        let of = |bits: &[u64]| bits.iter().fold(Special::NONE, |s, &b| s.absorb(b));
+
+        assert_eq!(value(Special::NONE), None);
+        assert_eq!(value(of(&[pos, pos])), Some(pos));
+        assert_eq!(value(of(&[neg])), Some(neg));
+        assert_eq!(value(of(&[pos, neg])), Some(f64::NAN.to_bits()));
+        // The first NaN wins, also over earlier infinities of both signs.
+        assert_eq!(value(of(&[pos, nan, other_nan])), Some(nan));
+        assert_eq!(value(of(&[pos, neg, nan])), Some(nan));
+        assert_eq!(value(of(&[nan, pos])), Some(nan));
         assert_eq!(
-            Special::None.combine(Special::Infinity(neg)),
-            Special::Infinity(neg)
+            value(of(&[neg]).combine(of(&[pos]))),
+            Some(f64::NAN.to_bits())
         );
-        assert!(matches!(
-            Special::Infinity(pos).combine(Special::Infinity(neg)),
-            Special::NaN(_)
-        ));
+        assert_eq!(value(of(&[other_nan]).combine(of(&[nan]))), Some(other_nan));
+    }
+
+    #[test]
+    fn special_combination_is_associative() {
+        let pos = f64::INFINITY.to_bits();
+        let neg = f64::NEG_INFINITY.to_bits();
+        let nan = f64::NAN.to_bits() | 0xBEEF;
+        let other_nan = f64::NAN.to_bits() | 0x1234;
+        let parts: Vec<Special> = [&[][..], &[pos], &[neg], &[nan], &[other_nan], &[pos, nan]]
+            .iter()
+            .map(|bits| bits.iter().fold(Special::NONE, |s, &b| s.absorb(b)))
+            .collect();
+        for &a in &parts {
+            for &b in &parts {
+                for &c in &parts {
+                    assert_eq!(
+                        a.combine(b).combine(c),
+                        a.combine(b.combine(c)),
+                        "{a:?} {b:?} {c:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn merge_grouping_does_not_change_nan_payload() {
+        let payload = f64::from_bits(f64::NAN.to_bits() | 0xBEEF);
+        let acc = |v: f64| -> SmallAccumulator { [v].into_iter().collect() };
+        let sequential: SmallAccumulator = [f64::INFINITY, f64::NEG_INFINITY, payload]
+            .into_iter()
+            .collect();
+        let mut left = acc(f64::INFINITY);
+        left.merge(&acc(f64::NEG_INFINITY));
+        left.merge(&acc(payload));
+        let mut right_tail = acc(f64::NEG_INFINITY);
+        right_tail.merge(&acc(payload));
+        let mut right = acc(f64::INFINITY);
+        right.merge(&right_tail);
+        for result in [sequential, left, right] {
+            assert_eq!(result.to_f64().to_bits(), payload.to_bits());
+        }
     }
 }

@@ -105,6 +105,14 @@ def test_nan_payload_of_first_nan_is_kept() -> None:
         assert float_bits(run_xsum(values)) == float_bits(first)
 
 
+def test_nan_payload_is_kept_after_opposite_infinities() -> None:
+    payload = float_from_bits(0x7FF8_0000_0000_BEEF)
+    for n in [10, 5_000, 100_000]:
+        values = [1.0] * n
+        values[1], values[n // 2], values[n - 1] = math.inf, -math.inf, payload
+        assert float_bits(run_xsum(values)) == float_bits(payload)
+
+
 def test_multiple_chunks() -> None:
     parts = [
         pl.Series("x", [1e100, None, 1.0]),

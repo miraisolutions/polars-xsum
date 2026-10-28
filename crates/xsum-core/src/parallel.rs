@@ -22,11 +22,11 @@ const MAX_BLOCK_LEN: usize = 1 << 14;
 /// Target number of rayon tasks per thread in [`par_sum_blocks`].
 const TASKS_PER_THREAD: usize = 4;
 
-/// Returns the block length for summing `len` elements: about four blocks per
-/// thread, clamped to `[2^12, 2^14]`.
+/// Returns the block length for summing `len` elements: about
+/// [`TASKS_PER_THREAD`] blocks per thread, clamped to `[2^12, 2^14]`.
 #[must_use]
 pub fn block_len(len: usize) -> usize {
-    (len / (4 * rayon::current_num_threads())).clamp(MIN_BLOCK_LEN, MAX_BLOCK_LEN)
+    (len / (TASKS_PER_THREAD * rayon::current_num_threads())).clamp(MIN_BLOCK_LEN, MAX_BLOCK_LEN)
 }
 
 /// Returns the exact sum of `values` correctly rounded to `f64`, using all
@@ -70,7 +70,8 @@ fn par_exact_sum<T: Copy + Into<f64> + Sync>(values: &[T]) -> SmallAccumulator {
 /// `feed` adds the values of one work item to an accumulator. Each rayon task
 /// owns one [`LargeAccumulator`] (taken from a per-thread cache) and
 /// processes a run of consecutive items, about four tasks per thread. The
-/// partial sums are merged exactly at the end. The result does not depend on how rayon splits the work.
+/// partial sums are merged exactly at the end. The result does not depend on
+/// how rayon splits the work.
 ///
 /// This is the building block for summing data that is not a single slice,
 /// e.g. the chunks of a columnar array that may contain missing values.
@@ -140,5 +141,27 @@ mod tests {
         assert_eq!(par_sum_f64(&values), f64::INFINITY);
         values[7] = f64::NEG_INFINITY;
         assert!(par_sum_f64(&values).is_nan());
+    }
+
+    #[test]
+    fn nan_payload_does_not_depend_on_thread_count() {
+        // Opposite infinities in different blocks, followed by a NaN with a
+        // payload: the payload must survive however the partial sums are merged.
+        let payload = f64::from_bits(f64::NAN.to_bits() | 0xBEEF);
+        let mut values = vec![1.0; 8 * MAX_BLOCK_LEN];
+        values[10] = f64::INFINITY;
+        values[3 * MAX_BLOCK_LEN] = f64::NEG_INFINITY;
+        values[7 * MAX_BLOCK_LEN] = payload;
+        assert_eq!(crate::sum_f64(&values).to_bits(), payload.to_bits());
+        for threads in 1..=8 {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            for _ in 0..20 {
+                let result = pool.install(|| par_sum_f64(&values));
+                assert_eq!(result.to_bits(), payload.to_bits(), "{threads} threads");
+            }
+        }
     }
 }
