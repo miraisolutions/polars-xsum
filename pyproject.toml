@@ -1,0 +1,79 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "polars-xsum"
+description = "Exact, correctly rounded summation of floats for Polars (Radford Neal's xsum superaccumulators)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Martin Studer", email = "martin.studer@mirai-solutions.com" }]
+requires-python = ">=3.11"
+dynamic = ["version"]
+# The plugin interface is stable: the full test suite passes from Polars 1.0.0
+# (checked in CI) up to the latest release.
+dependencies = ["polars>=1.0"]
+keywords = ["polars", "plugin", "summation", "exact", "floating-point", "xsum"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.100",
+    "maturin>=1.9,<2",
+    "numpy>=2.0",
+    "pytest>=8.3",
+    "ruff>=0.11",
+    "ty>=0.0.93",
+]
+
+[tool.maturin]
+manifest-path = "crates/polars-xsum/Cargo.toml"
+python-source = "python"
+module-name = "polars_xsum._internal"
+features = ["pyo3/extension-module"]
+
+[tool.uv]
+# Rebuild the extension whenever the Rust sources change.
+cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "crates/**/*.rs" }, { file = "crates/**/Cargo.toml" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "python"]
+addopts = ["--doctest-modules", "--strict-markers", "-ra"]
+xfail_strict = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",  # conflicts with the formatter
+    "CPY001",  # no per-file copyright headers
+    "D203",    # incompatible with D211
+    "D213",    # incompatible with D212
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "D", "INP001"]
+"benchmarks/**" = ["T201", "S311", "INP001", "PLR2004"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["polars_xsum"]
+known-local-folder = ["oracle"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ty.src]
+include = ["python", "tests", "benchmarks"]
+
+[tool.ty.terminal]
+# Treat warnings as errors, so `ty check` fails on any diagnostic.
+error-on-warning = true

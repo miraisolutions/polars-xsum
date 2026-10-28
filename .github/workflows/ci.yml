@@ -1,0 +1,245 @@
+# Continuous integration and release.
+#
+# * Every push and pull request: Rust checks (fmt, clippy, tests, docs, MSRV),
+#   Python checks (ruff, ty), the Python test suite on Linux/macOS/Windows with
+#   the oldest supported and the latest Polars, wheel builds for all platforms,
+#   and a test run against the built wheels.
+# * Pushing a tag `vX.Y.Z` (matching the crate version) additionally publishes
+#   the wheels and the sdist to PyPI via trusted publishing (no API token).
+#
+# The wheel jobs are based on `maturin generate-ci github`. Actions are pinned
+# to commit SHAs (Dependabot keeps them current), and caches are disabled on
+# tag runs so that release artifacts are always built from scratch.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on any compiler warning (clippy is run with `-D warnings` as well).
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      # Test-only job (nothing is published from it), and skipped on tags.
+      - if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The plugin crate's unit tests link against libpython.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --release --locked
+        env:
+          PROPTEST_CASES: "1000"
+      - run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (keep in sync with `rust-version` in Cargo.toml)
+        run: rustup toolchain install 1.95 --profile minimal
+      # Test-only job (nothing is published from it), and skipped on tags.
+      - if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo +1.95 check --workspace --all-targets --locked
+
+  python-lint:
+    name: Python lint and type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      # Test-only job (nothing is published from it), and skipped on tags.
+      - if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: uv sync --locked
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run ty check
+
+  python-tests:
+    name: Python tests (${{ matrix.os }}, Python ${{ matrix.python }}, Polars ${{ matrix.polars }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.14"]
+        polars: [locked]
+        include:
+          # The oldest Polars release declared as supported in pyproject.toml.
+          - os: ubuntu-latest
+            python: "3.11"
+            polars: "1.0.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: ${{ matrix.python }}
+      # Test-only job (nothing is published from it), and skipped on tags.
+      - if: ${{ !startsWith(github.ref, 'refs/tags/') }} # zizmor: ignore[cache-poisoning]
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build the extension and install dependencies
+        run: uv sync --locked
+      - name: Run the tests
+        if: matrix.polars == 'locked'
+        run: uv run --no-sync pytest
+      - name: Run the tests with Polars ${{ matrix.polars }}
+        if: matrix.polars != 'locked'
+        # Doctests are skipped: their expected output follows the current
+        # Polars formatting.
+        run: |
+          uv pip install "polars==${{ matrix.polars }}"
+          uv run --no-sync pytest tests
+
+  wheels:
+    name: Wheel (${{ matrix.platform.os }}, ${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { os: linux, runner: ubuntu-latest, target: x86_64 }
+          - { os: linux, runner: ubuntu-latest, target: aarch64 }
+          - { os: windows, runner: windows-latest, target: x64 }
+          # Both macOS wheels are built on Apple Silicon; x86_64 is cross-compiled.
+          - { os: macos, runner: macos-latest, target: x86_64 }
+          - { os: macos, runner: macos-latest, target: aarch64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Build the wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
+          # No compiler cache for release builds (cache-poisoning protection).
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          manylinux: auto
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: dist
+
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheels-sdist
+          path: dist
+
+  test-wheels:
+    name: Test wheel (${{ matrix.runner }})
+    needs: wheels
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, artifact: wheels-linux-x86_64 }
+          - { runner: ubuntu-24.04-arm, artifact: wheels-linux-aarch64 }
+          - { runner: windows-latest, artifact: wheels-windows-x64 }
+          - { runner: macos-latest, artifact: wheels-macos-aarch64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.13"
+      - name: Install the wheel into a fresh environment
+        shell: bash
+        run: |
+          uv venv
+          uv pip install dist/*.whl pytest hypothesis
+      # Run from the tests directory, so the installed wheel is imported
+      # instead of the sources in python/.
+      - name: Run the tests against the installed wheel
+        shell: bash
+        working-directory: tests
+        run: uv run --no-project --python ../.venv pytest -p no:cacheprovider -o addopts="" .
+
+  release:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rust, msrv, python-lint, python-tests, test-wheels, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/polars-xsum
+    permissions:
+      id-token: write # trusted publishing
+      attestations: write # build provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check that the tag matches the crate version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match version ${version} in Cargo.toml"
+            exit 1
+          fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist
