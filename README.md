@@ -147,10 +147,12 @@ Every finite double is an integer multiple of `2^-1075`, so a sum of doubles is 
 * **Large superaccumulator**: one 64-bit chunk per sign and exponent (4096 chunks). A double is
   added by adding its *raw bit pattern* to the chunk selected by its top 12 bits. The mantissa
   sum can be recovered exactly as long as a chunk holds at most 2048 values. A full chunk is
-  flushed into the small accumulator. Each chunk index has 4 *lanes* (separate chunks in one cache
-  line) that consecutive values alternate between. This breaks the store-to-load dependency
-  chains when many consecutive values share an exponent. The large accumulator handles about
-  1.8 G values/s on one core, faster than naive sequential `f64` summation on the same machine.
+  flushed into the small accumulator. A per-chunk counter of remaining capacity makes the common
+  case a single decrement-and-branch plus one read-modify-write. Each chunk index has 4 *lanes*
+  (separate chunks in one cache line) that consecutive values alternate between. This breaks the
+  store-to-load dependency chains when many consecutive values share an exponent. The large
+  accumulator handles about 2.3 G values/s on one core, ~20% faster than naive sequential `f64`
+  summation on the same machine.
 * **Rounding** extracts the top 53 bits of the exact integer plus guard and sticky bits. `Float32`
   results first round to `f64` with *round-to-odd*, after which the conversion to `f32` is
   provably correctly rounded.

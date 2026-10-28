@@ -9,8 +9,14 @@
 //! That holds for `n ≤ 2048`. A full chunk is transferred to a
 //! [`SmallAccumulator`] and starts again from scratch.
 //!
-//! Adding a value therefore costs one well-predicted branch plus two
-//! read-modify-write operations.
+//! `n` is stored as the remaining capacity `2048 − n` of a chunk, and unused
+//! chunks have no capacity either. Decrementing the capacity borrows exactly
+//! when the value needs the slow path, so the hot path is a single
+//! decrement-and-branch plus a read-modify-write of the chunk.
+//!
+//! The hot path receives the tables as separate references. Through `&mut self`
+//! the compiler would reload the table pointers after every store, as it cannot
+//! rule out that a store into a table modifies the accumulator itself.
 //!
 //! # Lanes
 //!
@@ -41,6 +47,9 @@ const _: () = {
     assert!(USED_WORDS <= 64, "the summary bitmap is a single u64");
 };
 
+/// A table with `LANES` entries per chunk index.
+type Table<T, const LANES: usize> = [[T; LANES]; NUM_CHUNKS];
+
 /// An exact accumulator for sums of `f64` values optimised for throughput on
 /// long inputs.
 ///
@@ -62,15 +71,46 @@ const _: () = {
 #[derive(Clone, Debug)]
 pub struct LargeAccumulator<const LANES: usize = DEFAULT_LANES> {
     /// Sums of raw bit patterns, per chunk index and lane.
-    chunks: Box<[[u64; LANES]; NUM_CHUNKS]>,
-    /// Number of values in each chunk (0 = unused, `MAX_COUNT` = full).
-    counts: Box<[[u16; LANES]; NUM_CHUNKS]>,
-    /// Bitmap of chunk indices that have been used in any lane.
+    chunks: Box<Table<u64, LANES>>,
+    /// Number of values each chunk can still take before it is full. All lanes
+    /// of an unused index are 0, all lanes of a newly used one `MAX_COUNT`.
+    remaining: Box<Table<u16, LANES>>,
+    /// State that is only touched outside the hot path.
+    cold: ColdState,
+}
+
+/// The parts of a [`LargeAccumulator`] the hot path doesn't touch.
+#[derive(Clone, Debug)]
+struct ColdState {
+    /// Bitmap of chunk indices that are in use (in all lanes).
     used: [u64; USED_WORDS],
     /// Bitmap of non-zero words of `used`.
     used_summary: u64,
     /// Receives full chunks, infinities and NaNs.
     small: SmallAccumulator,
+}
+
+impl ColdState {
+    const fn new() -> Self {
+        Self {
+            used: [0; USED_WORDS],
+            used_summary: 0,
+            small: SmallAccumulator::new(),
+        }
+    }
+
+    /// Marks chunk `index` as used. Returns `false` if it already was.
+    fn mark_used(&mut self, index: usize) -> bool {
+        let bit = 1 << (index % 64);
+        let newly_used = self.used[index / 64] & bit == 0;
+        self.used[index / 64] |= bit;
+        self.used_summary |= 1 << (index / 64);
+        newly_used
+    }
+
+    fn used_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        used_indices(&self.used, self.used_summary)
+    }
 }
 
 impl<const LANES: usize> Default for LargeAccumulator<LANES> {
@@ -91,17 +131,21 @@ impl<const LANES: usize> LargeAccumulator<LANES> {
         let () = Self::LANES_IS_VALID;
         Self {
             chunks: zeroed_table(),
-            counts: zeroed_table(),
-            used: [0; USED_WORDS],
-            used_summary: 0,
-            small: SmallAccumulator::new(),
+            remaining: zeroed_table(),
+            cold: ColdState::new(),
         }
     }
 
     /// Adds a single value.
     #[inline]
     pub fn add(&mut self, value: f64) {
-        self.add_in_lane(0, value.to_bits());
+        Self::add_in_lane(
+            &mut self.chunks,
+            &mut self.remaining,
+            &mut self.cold,
+            0,
+            value.to_bits(),
+        );
     }
 
     /// Adds all values of a slice.
@@ -109,14 +153,17 @@ impl<const LANES: usize> LargeAccumulator<LANES> {
     /// Accepts any element type that converts losslessly into `f64`, in
     /// particular `f32` and `f64`.
     pub fn add_slice<T: Copy + Into<f64>>(&mut self, values: &[T]) {
+        let chunks = &mut *self.chunks;
+        let remaining = &mut *self.remaining;
+        let cold = &mut self.cold;
         let (blocks, remainder) = values.as_chunks::<LANES>();
         for block in blocks {
             for (lane, &value) in block.iter().enumerate() {
-                self.add_in_lane(lane, value.into().to_bits());
+                Self::add_in_lane(chunks, remaining, cold, lane, value.into().to_bits());
             }
         }
         for (lane, &value) in remainder.iter().enumerate() {
-            self.add_in_lane(lane, value.into().to_bits());
+            Self::add_in_lane(chunks, remaining, cold, lane, value.into().to_bits());
         }
     }
 
@@ -124,15 +171,16 @@ impl<const LANES: usize> LargeAccumulator<LANES> {
     /// [`SmallAccumulator`], e.g. to merge partial sums.
     #[must_use]
     pub fn to_small(&self) -> SmallAccumulator {
-        let mut small = self.small.clone();
-        for index in used_indices(&self.used, self.used_summary) {
+        let mut small = self.cold.small.clone();
+        for index in self.cold.used_indices() {
             // All lanes of an index share sign and exponent, so they are
             // combined into a single transfer.
             let magnitude = self.chunks[index]
                 .iter()
-                .zip(&self.counts[index])
-                .filter(|&(_, &count)| count > 0)
-                .map(|(&sum, &count)| u128::from(chunk_magnitude(index, sum, count)))
+                .zip(&self.remaining[index])
+                .map(|(&sum, &remaining)| {
+                    u128::from(chunk_magnitude(index, sum, MAX_COUNT - remaining))
+                })
                 .sum();
             transfer(&mut small, index, magnitude);
         }
@@ -144,12 +192,10 @@ impl<const LANES: usize> LargeAccumulator<LANES> {
     /// The cost is proportional to the number of chunks used, so reusing an
     /// accumulator is much cheaper than allocating a new one.
     pub fn clear(&mut self) {
-        for index in used_indices(&self.used, self.used_summary) {
-            self.counts[index] = [0; LANES];
+        for index in self.cold.used_indices() {
+            self.remaining[index] = [0; LANES];
         }
-        self.used = [0; USED_WORDS];
-        self.used_summary = 0;
-        self.small = SmallAccumulator::new();
+        self.cold = ColdState::new();
     }
 
     /// Returns the exact sum correctly rounded to the nearest `f64`.
@@ -170,38 +216,53 @@ impl<const LANES: usize> LargeAccumulator<LANES> {
 
     /// The hot path: adds a value (given by its bits) to a chunk of `lane`.
     #[inline]
-    fn add_in_lane(&mut self, lane: usize, bits: u64) {
+    fn add_in_lane(
+        chunks: &mut Table<u64, LANES>,
+        remaining: &mut Table<u16, LANES>,
+        cold: &mut ColdState,
+        lane: usize,
+        bits: u64,
+    ) {
         let index = (bits >> MANTISSA_BITS) as usize;
-        let count = self.counts[index][lane];
-        // `count` in 1..MAX_COUNT: the chunk is in use and not full yet.
-        if count.wrapping_sub(1) < MAX_COUNT - 1 {
-            self.counts[index][lane] = count + 1;
-            let chunk = &mut self.chunks[index][lane];
-            *chunk = chunk.wrapping_add(bits);
+        let (left, exhausted) = remaining[index][lane].overflowing_sub(1);
+        remaining[index][lane] = left;
+        if exhausted {
+            Self::add_in_lane_slow(chunks, remaining, cold, lane, bits);
         } else {
-            self.add_in_lane_slow(lane, bits);
+            let chunk = &mut chunks[index][lane];
+            *chunk = chunk.wrapping_add(bits);
         }
     }
 
-    /// Handles specials, first use of a chunk and full chunks.
+    /// Handles specials, first use of a chunk index and full chunks. On entry,
+    /// the hot path has wrapped the chunk's remaining capacity from 0 to
+    /// `u16::MAX`.
     #[cold]
     #[inline(never)]
-    fn add_in_lane_slow(&mut self, lane: usize, bits: u64) {
+    fn add_in_lane_slow(
+        chunks: &mut Table<u64, LANES>,
+        remaining: &mut Table<u16, LANES>,
+        cold: &mut ColdState,
+        lane: usize,
+        bits: u64,
+    ) {
+        let index = (bits >> MANTISSA_BITS) as usize;
         if is_special(bits) {
-            self.small.add_special(bits);
+            // Special indices are never used, so they always take this path.
+            remaining[index][lane] = 0;
+            cold.small.add_special(bits);
             return;
         }
-        let index = (bits >> MANTISSA_BITS) as usize;
-        let count = self.counts[index][lane];
-        if count == 0 {
-            self.used[index / 64] |= 1 << (index % 64);
-            self.used_summary |= 1 << (index / 64);
+        if cold.mark_used(index) {
+            chunks[index] = [0; LANES];
+            remaining[index] = [MAX_COUNT; LANES];
         } else {
-            let magnitude = chunk_magnitude(index, self.chunks[index][lane], count);
-            transfer(&mut self.small, index, u128::from(magnitude));
+            // The index is in use, so this lane's chunk is full.
+            let magnitude = chunk_magnitude(index, chunks[index][lane], MAX_COUNT);
+            transfer(&mut cold.small, index, u128::from(magnitude));
         }
-        self.chunks[index][lane] = bits;
-        self.counts[index][lane] = 1;
+        chunks[index][lane] = bits;
+        remaining[index][lane] = MAX_COUNT - 1;
     }
 }
 
@@ -244,7 +305,7 @@ fn set_bits(mut word: u64) -> impl Iterator<Item = usize> {
 }
 
 /// Allocates a zero-initialised table on the heap (without a stack temporary).
-fn zeroed_table<T: Copy + Default, const LANES: usize>() -> Box<[[T; LANES]; NUM_CHUNKS]> {
+fn zeroed_table<T: Copy + Default, const LANES: usize>() -> Box<Table<T, LANES>> {
     vec![[T::default(); LANES]; NUM_CHUNKS]
         .into_boxed_slice()
         .try_into()
@@ -276,6 +337,21 @@ mod tests {
     }
 
     #[test]
+    fn lanes_of_an_index_fill_independently() {
+        // Lane 0 fills the chunk of 1.5 and rolls over. The other lanes of the
+        // same index hold two values of 1.25 each, and otherwise zeros.
+        let values: Vec<f64> = (0..4 * (MAX_COUNT as usize + 1))
+            .map(|i| match (i % 4, i < 8) {
+                (0, _) => 1.5,
+                (_, true) => 1.25,
+                _ => 0.0,
+            })
+            .collect();
+        let expected = f64::from(MAX_COUNT + 1) * 1.5 + 6.0 * 1.25;
+        assert_eq!(sum::<4>(&values), expected);
+    }
+
+    #[test]
     fn subnormals_have_no_implicit_bit() {
         let tiny = f64::from_bits(0x000F_FFFF_FFFF_FFFF);
         let values = vec![tiny; 5000];
@@ -286,7 +362,7 @@ mod tests {
     fn tracks_used_chunks() {
         let mut acc = LargeAccumulator::<2>::new();
         acc.add_slice(&[1.0, -1.0, 3.0, 1e300, -1e-300, 0.0]);
-        let used: Vec<usize> = used_indices(&acc.used, acc.used_summary).collect();
+        let used: Vec<usize> = acc.cold.used_indices().collect();
         let index = |v: f64| (v.to_bits() >> MANTISSA_BITS) as usize;
         let mut expected = vec![
             index(1.0),
@@ -304,7 +380,9 @@ mod tests {
     fn specials_bypass_chunks() {
         let mut acc = LargeAccumulator::<1>::new();
         acc.add_slice(&vec![f64::INFINITY; 5000]);
-        assert_eq!(acc.used_summary, 0);
+        assert_eq!(acc.cold.used_summary, 0);
+        let index = (f64::INFINITY.to_bits() >> MANTISSA_BITS) as usize;
+        assert_eq!(acc.remaining[index], [0]);
         assert_eq!(acc.to_f64(), f64::INFINITY);
         acc.add(f64::NEG_INFINITY);
         assert!(acc.to_f64().is_nan());
@@ -326,8 +404,8 @@ mod tests {
         acc.add_slice(&vec![0.75; 5000]);
         acc.clear();
         assert_eq!(acc.to_f64().to_bits(), 0);
-        assert_eq!(acc.used_summary, 0);
-        assert!(acc.counts.iter().flatten().all(|&c| c == 0));
+        assert_eq!(acc.cold.used_summary, 0);
+        assert!(acc.remaining.iter().flatten().all(|&c| c == 0));
         acc.add_slice(&[2.0, 0.5, 1e300, -1e300]);
         assert_eq!(acc.to_f64(), 2.5);
     }
