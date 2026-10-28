@@ -5,11 +5,12 @@ the Polars plugin (`polars_xsum.xsum`, Python-level timings).
 
 ## Summary
 
-* **Single core:** the large superaccumulator sums **~1.8 G values/s** (0.55 ns/value). That
-  is as fast as naive sequential `f64` summation (`iter().sum()`, latency-bound at ~1.8 G/s) and
-  ~1.8× faster than Neumaier compensated summation, which is still inexact.
-* **All cores:** long inputs reach **~11 G values/s** (~90 GB/s while the data is in cache). From
-  10^7 values on, the sum runs at memory bandwidth and is as fast as rayon's parallel naive sum.
+* **Single core:** the large superaccumulator sums **~2.3 G values/s** (0.44 ns/value). That
+  is ~20% faster than naive sequential `f64` summation (`iter().sum()`, latency-bound at ~1.9 G/s)
+  and ~2× faster than Neumaier compensated summation, which is still inexact.
+* **All cores:** long inputs reach **~15 G values/s** (~120 GB/s) while the data is in cache. From
+  10^7 values on, the sum runs at memory bandwidth (~12 G values/s) and is as fast as rayon's
+  parallel naive sum.
 * **Through Polars:** for columns of 10^7 values or more, `xsum` costs the same as Polars' own
   inexact `sum` (≈ 65 GB/s).
 * **Exactness costs essentially nothing at scale.** The cost is visible for short columns (a few
@@ -24,7 +25,7 @@ the Polars plugin (`polars_xsum.xsum`, Python-level timings).
 | Memory | 32 GB |
 | OS | Linux 7.2.3 (Manjaro) |
 | Rust | 1.99.1 stable, `--release` with `lto = "fat"`, `codegen-units = 1`, default target (x86-64-v1) |
-| Python | 3.12.8, polars 2.1.0, numpy 2.5.4 |
+| Python | 3.13.18, polars 2.1.0, numpy 2.5.4 |
 
 Numbers are criterion's point estimates (median-based) or, for Python, the median of 7 runs after a
 warm-up. Run-to-run variation is typically below ±5%. Timings through Polars below 10^6 values are
@@ -48,12 +49,12 @@ Input: uniform `[0, 1)` unless noted. Throughput in values per second (higher is
 
 | n | naive | neumaier | small | large ×1 | large ×2 | large ×4 | large ×8 | `sum_f64` | `par_sum_f64` | par_naive |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 10^2 | 3.87 G | 947 M | **562 M** | 197 M | 144 M | 84 M | 47 M | 501 M | 506 M | 6.6 M |
-| 10^3 | 1.62 G | 941 M | 761 M | **884 M** | 770 M | 576 M | 351 M | 742 M | 754 M | 38 M |
-| 10^4 | 1.51 G | 1.16 G | 769 M | 1.21 G | 1.37 G | 1.48 G | 1.16 G | **1.73 G** | 1.74 G | 269 M |
-| 10^5 | 1.71 G | 1.03 G | 778 M | 1.26 G | 1.51 G | 1.77 G | 1.49 G | 1.81 G | **4.68 G** | 1.85 G |
-| 10^6 | 1.81 G | 980 M | 784 M | 1.27 G | 1.52 G | 1.82 G | 1.55 G | 1.81 G | **10.7 G** | 10.1 G |
-| 10^7 | 1.84 G | 944 M | 780 M | 1.27 G | 1.51 G | 1.82 G | 1.55 G | 1.79 G | **11.2 G** | 11.1 G |
+| 10^2 | 3.88 G | 1.17 G | **554 M** | 235 M | 153 M | 87 M | 47 M | 480 M | 472 M | 6.3 M |
+| 10^3 | 1.90 G | 1.17 G | 746 M | **1.01 G** | 861 M | 609 M | 385 M | 691 M | 682 M | 37 M |
+| 10^4 | 1.84 G | 1.17 G | 774 M | 1.53 G | 1.77 G | 1.85 G | 1.51 G | **2.22 G** | 2.24 G | 264 M |
+| 10^5 | 1.88 G | 1.14 G | 770 M | 1.55 G | 1.98 G | 2.18 G | 1.99 G | 2.27 G | **5.30 G** | 1.79 G |
+| 10^6 | 1.87 G | 1.17 G | 774 M | 1.60 G | 2.05 G | 2.26 G | 2.16 G | 2.27 G | **15.1 G** | 10.2 G |
+| 10^7 | 1.87 G | 1.16 G | 774 M | 1.59 G | 2.04 G | 2.24 G | 2.13 G | 2.24 G | **12.0 G** | 11.6 G |
 
 Observations:
 
@@ -61,22 +62,31 @@ Observations:
   short inputs. The large one holds ~160 KiB of zero-initialised state per accumulator, which is
   amortised from a few thousand values on. `sum_f64` switches at 1,536 values. It takes its large
   accumulators from a per-thread cache, which makes it faster than a freshly allocated `large ×4`
-  at 10^4 values (1.73 G vs 1.48 G).
+  at 10^4 values (2.22 G vs 1.85 G).
+* **Hot path.** Adding a value to the large accumulator takes about 8 instructions: a
+  decrement-and-branch on the chunk's remaining capacity and a read-modify-write of the chunk. The
+  loop is bound by op throughput and memory operations, not by latency. Counting up and testing
+  the range of the count, as before, took ~14 instructions per value (1.82 G values/s). A
+  count-free variant that accumulates significands and flushes all chunks every `2048 · LANES`
+  values was at most ~10% faster on typical data. It was 3–4× slower on data with many zeros or
+  with spread-out exponents, so it was not adopted.
 * **Lanes.** With one lane, consecutive values with the same exponent update the same memory word,
   forming a load→add→store dependency chain through the store buffer. Four lanes (separate chunks
-  in the same cache line, used round-robin) break the chain: 1.27 G → 1.82 G values/s. Eight lanes
+  in the same cache line, used round-robin) break the chain: 1.60 G → 2.26 G values/s. Eight lanes
   are slower again (larger state, more chunks to flush). **4 lanes is the default.**
-* **Parallel scaling** is limited by memory bandwidth for large n, not by the algorithm. At 10^7
-  values (80 MB) the exact `par_sum_f64` is as fast as the inexact parallel naive sum.
+* **Parallel scaling** is limited by memory bandwidth for large n, not by the algorithm. While the
+  data is in cache (10^6 values), the exact `par_sum_f64` is 1.5× faster than the inexact parallel
+  naive sum, which is latency-bound per core. At 10^7 values (80 MB) both run at memory
+  bandwidth.
 
 ### Input distribution (n = 10^6)
 
 | distribution | naive | small | large ×4 | `sum_f64` | `par_sum_f64` |
 |---|---:|---:|---:|---:|---:|
-| uniform `[0, 1)` | 1.67 G | 781 M | 1.81 G | 1.81 G | 10.6 G |
-| normal, σ = 1000 | 1.82 G | 768 M | 1.81 G | 1.80 G | 10.4 G |
-| cancelling `x, −x` pairs | 1.53 G | 745 M | 1.81 G | 1.81 G | 10.5 G |
-| random bit patterns ("wide") | 1.80 G | 775 M | 1.28 G | 1.27 G | 2.19 G |
+| uniform `[0, 1)` | 1.88 G | 776 M | 2.25 G | 2.30 G | 15.2 G |
+| normal, σ = 1000 | 1.87 G | 763 M | 2.44 G | 2.46 G | 15.3 G |
+| cancelling `x, −x` pairs | 1.87 G | 733 M | 2.40 G | 2.43 G | 14.9 G |
+| random bit patterns ("wide") | 1.86 G | 765 M | 1.54 G | 1.54 G | 3.87 G |
 
 Throughput does not depend on the values (signs, cancellation, magnitudes) as long as they span a
 realistic range of exponents. The adversarial "wide" input draws exponents uniformly from the whole
@@ -93,21 +103,21 @@ of that cost:
 
 | n | naive `f32` | `sum_f32` | `par_sum_f32` |
 |---:|---:|---:|---:|
-| 10^3 | 1.75 G | 625 M | 614 M |
-| 10^6 | 1.82 G | 1.30 G | 8.34 G |
+| 10^3 | 1.97 G | 584 M | 581 M |
+| 10^6 | 1.88 G | 1.69 G | 10.7 G |
 
 `f32` values are widened exactly to `f64` on the fly (one conversion instruction per value), and the
-result is rounded to `f32` via round-to-odd. Single-threaded, this runs at ~70% of the `f64`
-throughput, and ~80% in parallel.
+result is rounded to `f32` via round-to-odd. This runs at ~70–75% of the `f64` throughput, both
+single-threaded and in parallel.
 
 ### Thread scaling (n = 10^7, normal data)
 
 | threads | 1 | 2 | 4 | 8 | 12 | 16 | 24 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| values/s | 1.46 G | 3.42 G | 6.51 G | 10.2 G | 11.3 G | 10.4 G | 11.2 G |
-| speed-up | 1.0× | 2.3× | 4.5× | 7.0× | 7.7× | 7.2× | 7.7× |
+| values/s | 2.21 G | 4.33 G | 8.49 G | 12.2 G | 12.8 G | 11.4 G | 12.0 G |
+| speed-up | 1.0× | 2.0× | 3.8× | 5.5× | 5.8× | 5.2× | 5.4× |
 
-Scaling is near-linear up to 4–8 threads. It saturates at ~11 G values/s ≈ 90 GB/s. That is
+Scaling is near-linear up to 4 threads. It saturates at ~12 G values/s ≈ 100 GB/s. That is
 mostly served from the 64 MiB L3 (the 80 MB input partly fits), and beyond that from DRAM. SMT
 threads bring no further gain. The algorithm is load/store-port bound, and both hyperthreads of a
 core share those ports.
@@ -116,9 +126,9 @@ core share those ports.
 
 | block | 4Ki | 16Ki | 32Ki | 64Ki | 256Ki | 1Mi |
 |---|---:|---:|---:|---:|---:|---:|
-| values/s | 10.5 G | 10.9 G | 11.2 G | 10.7 G | 10.9 G | 8.4 G |
+| values/s | 11.7 G | 11.7 G | 11.8 G | 12.0 G | 11.8 G | 10.6 G |
 
-Blocks between 16Ki and 256Ki values perform the same. Only blocks too coarse for 24 threads lose
+Blocks between 4Ki and 256Ki values perform the same. Only blocks too coarse for 24 threads lose
 throughput. The library uses `len / (4 · threads)` clamped to `[4Ki, 16Ki]`. Inputs below 32Ki
 values are summed serially (parallelism did not pay off below that in a separate sweep).
 
@@ -131,9 +141,9 @@ require `unsafe`. Compiling with `RUSTFLAGS="-C target-cpu=native"` (AVX-512 ena
 
 | benchmark | default target | `target-cpu=native` |
 |---|---:|---:|
-| large ×4, 10^6 | 1.82 G | 1.81 G |
-| small, 10^6 | 784 M | 553 M |
-| small, 10^3 | 761 M | 512 M |
+| large ×4, 10^6 | 2.26 G | 2.29 G |
+| small, 10^6 | 774 M | 552 M |
+| small, 10^3 | 746 M | 509 M |
 
 AVX-512 brings no benefit, and the small accumulator even gets slower: LLVM's AVX-512 code for the
 digit split costs more than it saves. Runtime CPU-feature dispatch (e.g. via `multiversion`) was
@@ -162,7 +172,7 @@ is computed with `fractions.Fraction`.
 | `math.fsum` | `-119.8196730748211` | 0 |
 | `xsum("x")` | `-119.8196730748211` | 0 |
 
-`math.fsum` is also correctly rounded, but it is 14× (10^4 values) to 260× (10^7 values) slower
+`math.fsum` is also correctly rounded, but it is 16× (10^4 values) to 280× (10^7 values) slower
 than `xsum` (see below). It also
 raises `OverflowError` on intermediate overflow, which `xsum` handles exactly.
 
@@ -170,12 +180,12 @@ raises `OverflowError` on intermediate overflow, which `xsum` handles exactly.
 
 | n | `pl.sum` | `xsum` | `np.sum` | `math.fsum` | `xsum` ns/value | `xsum` GB/s |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10^3 | 9.4 µs | 15.1 µs | 1.4 µs | 27.8 µs | 15.1 | 0.5 |
-| 10^4 | 8.9 µs | 19.0 µs | 2.1 µs | 269 µs | 1.90 | 4.2 |
-| 10^5 | 175 µs | 133 µs | 12.4 µs | 2.87 ms | 1.33 | 6.0 |
-| 10^6 | 177 µs | 244 µs | 107 µs | 29.5 ms | 0.24 | 32.7 |
-| 10^7 | 1.03 ms | 1.16 ms | 1.42 ms | 303 ms | 0.12 | 68.8 |
-| 10^8 | 12.2 ms | 12.4 ms | 16.0 ms | – | 0.12 | 64.7 |
+| 10^3 | 9.6 µs | 14.8 µs | 1.1 µs | 27.5 µs | 14.8 | 0.5 |
+| 10^4 | 8.4 µs | 16.6 µs | 2.1 µs | 265 µs | 1.66 | 4.8 |
+| 10^5 | 149 µs | 125 µs | 13.3 µs | 3.02 ms | 1.25 | 6.4 |
+| 10^6 | 142 µs | 154 µs | 130 µs | 27.5 ms | 0.15 | 52.0 |
+| 10^7 | 0.95 ms | 1.00 ms | 1.47 ms | 282 ms | 0.10 | 79.8 |
+| 10^8 | 12.1 ms | 11.9 ms | 14.9 ms | – | 0.12 | 67.0 |
 
 * For small columns, the time is dominated by Polars' per-query overhead (~9 µs for `pl.sum`).
   The plugin adds a few µs of FFI overhead on top.
@@ -188,22 +198,22 @@ raises `OverflowError` on intermediate overflow, which `xsum` handles exactly.
 
 | case | `pl.sum` | `xsum` |
 |---|---:|---:|
-| Float32, 10^4 | 10.8 µs | 21.2 µs |
-| Float32, 10^6 | 179 µs | 236 µs |
-| Float32, 10^7 | 470 µs | 860 µs |
-| Float64 with 10% nulls, 10^7 | 1.17 ms | 1.09 ms |
+| Float32, 10^4 | 8.4 µs | 18.0 µs |
+| Float32, 10^6 | 147 µs | 182 µs |
+| Float32, 10^7 | 471 µs | 658 µs |
+| Float64 with 10% nulls, 10^7 | 0.996 ms | 1.01 ms |
 
 `Float32` columns have half the bytes per value, so Polars' SIMD sum gets twice the throughput in
-values/s. `xsum` is compute-bound here at ~12 G values/s. Nulls are handled 64 values at a time
+values/s. `xsum` is compute-bound here at ~15 G values/s. Nulls are handled 64 values at a time
 from the validity bitmap and cost almost nothing.
 
 ### `group_by(...).agg(...)`, n = 10^7
 
 | groups | `pl.sum` | `xsum` | ratio |
 |---:|---:|---:|---:|
-| 10 | 4.3 ms | 67.2 ms | 15.7× |
-| 1,000 | 27 ms | 62 ms | 2.3× |
-| 100,000 | 33 ms | 144 ms | 4.4× |
+| 10 | 4.2 ms | 66.4 ms | 15.8× |
+| 1,000 | 26 ms | 58 ms | 2.2× |
+| 100,000 | 30 ms | 141 ms | 4.7× |
 
 This overhead is **not** the summation. Polars computes its built-in `sum` directly on the group
 indices. For any opaque aggregation, plugin or Python UDF alike, Polars first gathers every group
