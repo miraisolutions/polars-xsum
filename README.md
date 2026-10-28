@@ -102,7 +102,7 @@ uv run ty check                                         # Astral's type checker
   3.14, plus a run against the oldest supported Polars (1.0.0).
 * **Wheels:** abi3 wheels for Linux (x86_64 and aarch64, manylinux), Windows x64 and macOS
   (x86_64 and arm64), plus an sdist. The test suite then runs against the *installed* wheels on
-  each native platform.
+  each native platform (including Intel macOS), and against a build from the sdist.
 
 Actions are pinned to commit SHAs and kept current by Dependabot (`.github/dependabot.yml`). The
 workflow passes [actionlint](https://github.com/rhysd/actionlint) and
