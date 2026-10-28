@@ -218,7 +218,7 @@ from the validity bitmap and cost almost nothing.
 This overhead is **not** the summation. Polars computes its built-in `sum` directly on the group
 indices. For any opaque aggregation, plugin or Python UDF alike, Polars first gathers every group
 into its own Series and then calls the function once per group. Replacing `xsum` with
-`map_batches(lambda s: s.sum(), returns_scalar=True)` costs the same 69 ms for 10 groups. With
+`map_batches(lambda s: s.sum(), returns_scalar=True)` costs the same ~66 ms for 10 groups. With
 many small groups the per-call cost of the plugin interface (~1 µs per group) adds up. Running the
 plugin single-threaded (`RAYON_NUM_THREADS=1`) does not change these numbers, so there is no
 thread oversubscription.
