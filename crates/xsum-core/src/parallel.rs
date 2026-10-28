@@ -19,8 +19,9 @@ pub const PARALLEL_THRESHOLD: usize = 1 << 15;
 const MIN_BLOCK_LEN: usize = 1 << 12;
 const MAX_BLOCK_LEN: usize = 1 << 14;
 
-/// Target number of rayon tasks per thread in [`par_sum_blocks`].
-const TASKS_PER_THREAD: usize = 4;
+/// Target number of rayon tasks per thread in [`par_sum_blocks`], and of
+/// blocks per thread in [`block_len`].
+pub const TASKS_PER_THREAD: usize = 4;
 
 /// Returns the block length for summing `len` elements: about
 /// [`TASKS_PER_THREAD`] blocks per thread, clamped to `[2^12, 2^14]`.
@@ -69,9 +70,9 @@ fn par_exact_sum<T: Copy + Into<f64> + Sync>(values: &[T]) -> SmallAccumulator {
 ///
 /// `feed` adds the values of one work item to an accumulator. Each rayon task
 /// owns one [`LargeAccumulator`] (taken from a per-thread cache) and
-/// processes a run of consecutive items, about four tasks per thread. The
-/// partial sums are merged exactly at the end. The result does not depend on
-/// how rayon splits the work.
+/// processes a run of consecutive items, about [`TASKS_PER_THREAD`] tasks per
+/// thread. The partial sums are merged exactly at the end. The result does not
+/// depend on how rayon splits the work.
 ///
 /// This is the building block for summing data that is not a single slice,
 /// e.g. the chunks of a columnar array that may contain missing values.

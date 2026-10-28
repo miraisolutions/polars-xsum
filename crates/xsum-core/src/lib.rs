@@ -58,7 +58,9 @@ mod small;
 pub use cache::sum_with;
 pub use large::{DEFAULT_LANES, LargeAccumulator};
 #[cfg(feature = "parallel")]
-pub use parallel::{PARALLEL_THRESHOLD, block_len, par_sum_blocks, par_sum_f32, par_sum_f64};
+pub use parallel::{
+    PARALLEL_THRESHOLD, TASKS_PER_THREAD, block_len, par_sum_blocks, par_sum_f32, par_sum_f64,
+};
 pub use small::SmallAccumulator;
 
 /// Inputs shorter than this are summed with a [`SmallAccumulator`], longer
