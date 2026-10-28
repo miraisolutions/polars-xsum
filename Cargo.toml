@@ -7,6 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
+repository = "https://github.com/miraisolutions/polars-xsum"
 authors = ["Martin Studer <martin.studer@mirai-solutions.com>"]
 
 [workspace.lints.rust]
