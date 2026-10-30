@@ -12,7 +12,7 @@ from hypothesis import strategies as st
 
 from polars_xsum import xsum
 
-from oracle import expected_sum, float_from_bits, run_xsum, same_float
+from oracle import expected_sum, float_bits, float_from_bits, run_xsum, same_float
 
 if TYPE_CHECKING:
     import random
@@ -110,3 +110,26 @@ def test_group_by_matches_per_group_sums(groups: list[tuple[int, list[float | No
     for key in set(keys):
         expected = expected_sum([v for k, v in zip(keys, data, strict=True) if k == key])
         assert same_float(out[key], expected)
+
+
+@given(
+    st.lists(st.tuples(st.one_of(st.none(), st.integers(0, 5)), st.one_of(st.none(), mixed_f64))),
+    st.sampled_from([pl.Float32, pl.Float64]),
+)
+@settings(max_examples=200)
+def test_group_by_and_over_match_oracle(
+    rows: list[tuple[int | None, float | None]], dtype: type[pl.DataType]
+) -> None:
+    df = pl.DataFrame(rows, schema={"g": pl.Int64, "x": dtype}, orient="row")
+    out = df.group_by("g", maintain_order=True).agg(xsum("x"))
+    assert out.schema["x"] == dtype
+    groups: dict[int | None, list[float | None]] = {}
+    for key, value in df.cast({"x": pl.Float64}).iter_rows():
+        groups.setdefault(key, []).append(value)
+    sums = {}
+    for key, total in out.iter_rows():
+        assert same_float(total, expected_sum(groups[key], single=dtype == pl.Float32))
+        sums[key] = total
+    over = df.with_columns(total=xsum("x").over("g"))
+    for key, total in over.select("g", "total").iter_rows():
+        assert float_bits(total) == float_bits(sums[key])

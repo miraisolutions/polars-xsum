@@ -1,4 +1,4 @@
-//! Exact summation of (possibly chunked, possibly nullable) Polars columns.
+//! Exact summation of the (possibly nullable) lists of a Polars list column.
 
 use crate::pool;
 use polars::prelude::*;
@@ -38,42 +38,70 @@ impl Accumulate for LargeAccumulator {
     }
 }
 
-/// Sums all non-null values of `ca` exactly.
+/// Sums each list of `ca` exactly and rounds it with `round`. Null lists give
+/// null.
 ///
-/// Short columns, such as typical `group_by` groups, use a small
-/// accumulator. Long ones use a large accumulator, and very long ones are split
-/// into blocks that are summed on the plugin's thread pool (see [`pool`]).
-pub(crate) fn exact_sum<T>(ca: &ChunkedArray<T>) -> SmallAccumulator
+/// This is how `xsum` sums the groups of `group_by` and `over`: there, the
+/// input is the imploded column, with one list per group, so a single plugin
+/// call covers all groups. Many lists are summed in parallel on the plugin's
+/// thread pool; a single long list (`select`) is split into blocks (see
+/// [`sum_range`]).
+pub(crate) fn exact_list_sums<T>(
+    ca: &ListChunked,
+    round: impl Fn(&SmallAccumulator) -> T::Native + Sync,
+) -> PolarsResult<ChunkedArray<T>>
 where
     T: PolarsFloatType,
     T::Native: Into<f64>,
 {
-    let len = ca.len();
+    let mut chunks = Vec::with_capacity(ca.chunks().len());
+    for list in ca.downcast_iter() {
+        let Some(values) = list
+            .values()
+            .as_any()
+            .downcast_ref::<PrimitiveArray<T::Native>>()
+        else {
+            polars_bail!(ComputeError: "xsum: unexpected list values of dtype {:?}", list.values().dtype());
+        };
+        let offsets = list.offsets().buffer();
+        let sum_list = |row: usize| {
+            // Offsets are non-negative and increasing, so the casts are lossless.
+            let start = offsets[row] as usize;
+            let len = (offsets[row + 1] - offsets[row]) as usize;
+            round(&sum_range(values, start, len))
+        };
+        let total = list.offsets().range() as usize;
+        let sums: Vec<T::Native> = if list.len() > 1 && total >= PARALLEL_THRESHOLD {
+            pool::install(|| (0..list.len()).into_par_iter().map(sum_list).collect())
+        } else {
+            (0..list.len()).map(sum_list).collect()
+        };
+        chunks.push(PrimitiveArray::from_vec(sums).with_validity(list.validity().cloned()));
+    }
+    Ok(ChunkedArray::from_chunk_iter(ca.name().clone(), chunks))
+}
+
+/// Sums the non-null values in `array[start..start + len]` exactly.
+///
+/// Short ranges, such as typical `group_by` groups, use a small accumulator.
+/// Long ones use a large accumulator, and very long ones are split into blocks
+/// that are summed on the plugin's thread pool (see [`pool`]).
+fn sum_range<T>(array: &PrimitiveArray<T>, start: usize, len: usize) -> SmallAccumulator
+where
+    T: NativeType + Into<f64>,
+{
     if len < SMALL_THRESHOLD {
         let mut acc = SmallAccumulator::new();
-        for array in ca.downcast_iter() {
-            add_range(&mut acc, array, 0, array.len());
-        }
+        add_range(&mut acc, array, start, len);
         acc
     } else if len < PARALLEL_THRESHOLD {
-        sum_with(|acc| {
-            for array in ca.downcast_iter() {
-                add_range(acc, array, 0, array.len());
-            }
-        })
+        sum_with(|acc| add_range(acc, array, start, len))
     } else {
+        let block = block_len(len);
         pool::install(|| {
-            let block = block_len(len);
-            let ranges: Vec<_> = ca
-                .downcast_iter()
-                .flat_map(|array| {
-                    (0..array.len())
-                        .step_by(block)
-                        .map(move |start| (array, start, block.min(array.len() - start)))
-                })
-                .collect();
-            par_sum_blocks(ranges.into_par_iter(), |acc, (array, start, len)| {
-                add_range(acc, array, start, len);
+            let blocks = (0..len).into_par_iter().step_by(block);
+            par_sum_blocks(blocks, |acc, offset| {
+                add_range(acc, array, start + offset, block.min(len - offset));
             })
         })
     }
@@ -133,25 +161,33 @@ where
 mod tests {
     use super::*;
 
-    fn column(chunks: &[&[Option<f64>]]) -> Float64Chunked {
-        let mut iter = chunks
+    /// One list per group: `groups` gives the values of each list, `None` a
+    /// null list.
+    fn lists(groups: &[Option<Vec<Option<f64>>>]) -> ListChunked {
+        let mut ca: ListChunked = groups
             .iter()
-            .map(|chunk| Float64Chunked::from_iter_options("x".into(), chunk.iter().copied()));
-        let mut ca = iter.next().unwrap_or_default();
-        for other in iter {
-            ca.append_owned(other).unwrap();
-        }
+            .map(|group| {
+                group
+                    .as_ref()
+                    .map(|values| Series::from_iter(values.iter().copied()))
+            })
+            .collect();
+        ca.rename("x".into());
         ca
     }
 
-    #[test]
-    fn skips_nulls_across_chunks() {
-        let ca = column(&[
-            &[Some(1e100), None, Some(1.0)],
-            &[None, Some(-1e100), Some(2.0)],
-        ]);
-        assert_eq!(ca.chunks().len(), 2);
-        assert_eq!(exact_sum(&ca).to_f64(), 3.0);
+    fn list_sums(ca: &ListChunked) -> Vec<Option<u64>> {
+        exact_list_sums::<Float64Type>(ca, SmallAccumulator::to_f64)
+            .unwrap()
+            .iter()
+            .map(|sum| sum.map(f64::to_bits))
+            .collect()
+    }
+
+    /// The exact sum of `ca` as a single list, as `xsum` computes it in `select`.
+    fn sum_imploded(ca: Float64Chunked) -> f64 {
+        let sums = list_sums(&ca.into_series().implode().unwrap());
+        f64::from_bits(sums[0].unwrap())
     }
 
     #[test]
@@ -163,7 +199,7 @@ mod tests {
         let validity: Vec<bool> = (0..200).map(|i| i % 7 != 0).collect();
         let array = PrimitiveArray::from_vec(values).with_validity(Some(validity.into()));
         let ca = Float64Chunked::with_chunk("x".into(), array);
-        assert_eq!(exact_sum(&ca).to_f64(), 0.5 * 171.0);
+        assert_eq!(sum_imploded(ca), 0.5 * 171.0);
     }
 
     #[test]
@@ -171,15 +207,11 @@ mod tests {
         let values: Vec<Option<f64>> = (0..300)
             .map(|i| (i % 3 != 0).then_some(f64::from(i)))
             .collect();
-        let ca = column(&[&values]);
+        let ca = Float64Chunked::from_iter_options("x".into(), values.iter().copied());
         for (offset, len) in [(1, 299), (5, 64), (63, 130), (64, 64), (100, 1)] {
             let sliced = ca.slice(offset as i64, len);
             let expected: f64 = values[offset..offset + len].iter().flatten().sum();
-            assert_eq!(
-                exact_sum(&sliced).to_f64(),
-                expected,
-                "offset {offset}, len {len}"
-            );
+            assert_eq!(sum_imploded(sliced), expected, "offset {offset}, len {len}");
         }
     }
 
@@ -187,12 +219,12 @@ mod tests {
     fn all_size_classes_agree() {
         for n in [10, SMALL_THRESHOLD + 3, 3 * PARALLEL_THRESHOLD + 5] {
             let values: Vec<Option<f64>> = (0..n)
-                .map(|i| (i % 11 != 0).then(|| 1e10 * (i as f64 * 0.37).sin()))
+                .map(|i| (!i.is_multiple_of(11)).then(|| 1e10 * (i as f64 * 0.37).sin()))
                 .collect();
             let dense: Vec<f64> = values.iter().flatten().copied().collect();
-            let ca = column(&[&values[..n / 2], &values[n / 2..]]);
+            let ca = Float64Chunked::from_iter_options("x".into(), values.into_iter());
             assert_eq!(
-                exact_sum(&ca).to_f64().to_bits(),
+                sum_imploded(ca).to_bits(),
                 xsum_core::sum_f64(&dense).to_bits(),
                 "n = {n}"
             );
@@ -200,8 +232,68 @@ mod tests {
     }
 
     #[test]
-    fn f32_columns() {
-        let ca = Float32Chunked::from_iter_options(
+    fn lists_of_all_size_classes() {
+        let n = 3 * PARALLEL_THRESHOLD;
+        let value = |i: usize| (!i.is_multiple_of(13)).then(|| 1e10 * (i as f64 * 0.37).sin());
+        // Sizes cover the empty list and all size classes, and their total
+        // reaches the parallel path over lists.
+        let sizes = [0, 1, 7, SMALL_THRESHOLD + 3, n, 64];
+        let mut start = 0;
+        let groups: Vec<_> = sizes
+            .iter()
+            .map(|&size| {
+                start += size;
+                Some((start - size..start).map(value).collect::<Vec<_>>())
+            })
+            .chain([None])
+            .collect();
+        let expected: Vec<_> = groups
+            .iter()
+            .map(|group| {
+                group.as_ref().map(|values| {
+                    let dense: Vec<f64> = values.iter().flatten().copied().collect();
+                    xsum_core::sum_f64(&dense).to_bits()
+                })
+            })
+            .collect();
+        assert_eq!(list_sums(&lists(&groups)), expected);
+    }
+
+    #[test]
+    fn sliced_and_chunked_lists() {
+        let groups: Vec<_> = (0..40)
+            .map(|i| {
+                Some(
+                    (0..i)
+                        .map(|j| (j % 3 != 0).then_some(f64::from(j)))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        // These small integer sums are exact; `+ 0.0` turns the `-0.0` of an
+        // empty `sum()` into xsum's `+0.0`.
+        let expected = |range: std::ops::Range<usize>| -> Vec<Option<u64>> {
+            groups[range]
+                .iter()
+                .map(|g| {
+                    let sum = g.as_ref().unwrap().iter().flatten().sum::<f64>() + 0.0;
+                    Some(sum.to_bits())
+                })
+                .collect()
+        };
+        let ca = lists(&groups);
+        assert_eq!(list_sums(&ca.slice(5, 20)), expected(5..25));
+        let mut chunked = ca.slice(0, 10);
+        chunked.append(&ca.slice(30, 10)).unwrap();
+        assert_eq!(chunked.chunks().len(), 2);
+        let mut both = expected(0..10);
+        both.extend(expected(30..40));
+        assert_eq!(list_sums(&chunked), both);
+    }
+
+    #[test]
+    fn f32_lists() {
+        let values = Float32Chunked::from_iter_options(
             "x".into(),
             [
                 Some(1.0_f32),
@@ -211,6 +303,8 @@ mod tests {
             ]
             .into_iter(),
         );
-        assert_eq!(exact_sum(&ca).to_f32(), 1.0 + f32::EPSILON);
+        let lists = values.into_series().implode().unwrap();
+        let sums = exact_list_sums::<Float32Type>(&lists, SmallAccumulator::to_f32).unwrap();
+        assert_eq!(sums.get(0), Some(1.0 + f32::EPSILON));
     }
 }

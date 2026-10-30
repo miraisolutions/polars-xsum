@@ -11,9 +11,11 @@ license-files = ["LICENSE"]
 authors = [{ name = "Martin Studer", email = "martin.studer@mirai-solutions.com" }]
 requires-python = ">=3.11"
 dynamic = ["version"]
-# The plugin interface is stable: the full test suite passes from Polars 1.0.0
-# (checked in CI) up to the latest release.
-dependencies = ["polars>=1.0"]
+# From Polars 1.28, `xsum` sums all groups of `group_by`/`over` in one plugin
+# call (an elementwise function of `implode()` gives one value per group). The
+# full test suite passes from Polars 1.28.0 (checked in CI) up to the latest
+# release.
+dependencies = ["polars>=1.28"]
 keywords = ["polars", "plugin", "summation", "exact", "floating-point", "xsum"]
 classifiers = [
     "Programming Language :: Python :: 3",

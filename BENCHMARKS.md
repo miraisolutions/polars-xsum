@@ -11,11 +11,13 @@ the Polars plugin (`polars_xsum.xsum`, Python-level timings).
 * **All cores:** long inputs reach **~15 G values/s** (~120 GB/s) while the data is in cache. From
   10^7 values on, the sum runs at memory bandwidth (~12 G values/s) and is as fast as rayon's
   parallel naive sum.
-* **Through Polars:** for columns of 10^7 values or more, `xsum` costs the same as Polars' own
-  inexact `sum` (≈ 65 GB/s).
+* **Through Polars:** for contiguous columns of 10^7 values or more, `xsum` costs the same as
+  Polars' own inexact `sum` (≈ 65 GB/s). A column in many chunks is first copied into one buffer
+  (see below).
 * **Exactness costs essentially nothing at scale.** The cost is visible for short columns (a few
-  µs of extra fixed overhead) and in `group_by` with few groups, where Polars' generic plugin
-  aggregation path dominates (see below).
+  µs of extra fixed overhead) and in `group_by`/`over` with random keys, where Polars' gather of
+  the groups dominates (~60 ms per 10^7 values, see below). With sorted keys, `xsum` is within
+  ~2× of `sum` and even faster from 10^6 groups on.
 
 ## Setup
 
@@ -180,15 +182,16 @@ raises `OverflowError` on intermediate overflow, which `xsum` handles exactly.
 
 | n | `pl.sum` | `xsum` | `np.sum` | `math.fsum` | `xsum` ns/value | `xsum` GB/s |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10^3 | 9.6 µs | 14.8 µs | 1.1 µs | 27.5 µs | 14.8 | 0.5 |
-| 10^4 | 8.4 µs | 16.6 µs | 2.1 µs | 265 µs | 1.66 | 4.8 |
-| 10^5 | 149 µs | 125 µs | 13.3 µs | 3.02 ms | 1.25 | 6.4 |
-| 10^6 | 142 µs | 154 µs | 130 µs | 27.5 ms | 0.15 | 52.0 |
-| 10^7 | 0.95 ms | 1.00 ms | 1.47 ms | 282 ms | 0.10 | 79.8 |
-| 10^8 | 12.1 ms | 11.9 ms | 14.9 ms | – | 0.12 | 67.0 |
+| 10^3 | 9.4 µs | 18.1 µs | 1.2 µs | 28.7 µs | 18.1 | 0.4 |
+| 10^4 | 8.0 µs | 19.6 µs | 2.1 µs | 259 µs | 1.96 | 4.1 |
+| 10^5 | 142 µs | 112 µs | 19.5 µs | 2.75 ms | 1.12 | 7.1 |
+| 10^6 | 159 µs | 186 µs | 107 µs | 27.6 ms | 0.19 | 43.0 |
+| 10^7 | 0.93 ms | 1.03 ms | 1.31 ms | 281 ms | 0.10 | 78.0 |
+| 10^8 | 12.0 ms | 12.4 ms | 15.3 ms | – | 0.12 | 64.7 |
 
 * For small columns, the time is dominated by Polars' per-query overhead (~9 µs for `pl.sum`).
-  The plugin adds a few µs of FFI overhead on top.
+  The plugin adds ~9 µs on top: the FFI call, plus ~3 µs for the `implode` that lets `xsum` sum
+  all groups of a `group_by` in one call.
 * Between 10^5 and 10^6 values, both Polars and the plugin spend much of their time waking their
   thread pools, so those rows vary noticeably from run to run.
 * From 10^7 values on, `xsum` runs at memory bandwidth, within a few percent of Polars' inexact
@@ -201,24 +204,86 @@ raises `OverflowError` on intermediate overflow, which `xsum` handles exactly.
 | Float32, 10^4 | 8.4 µs | 18.0 µs |
 | Float32, 10^6 | 147 µs | 182 µs |
 | Float32, 10^7 | 471 µs | 658 µs |
-| Float64 with 10% nulls, 10^7 | 0.996 ms | 1.01 ms |
+| Float64 with 10% nulls, 10^7 | 0.973 ms | 1.01 ms |
+| Float64 in 100 chunks, 10^7 | 1.39 ms | 6.58 ms |
 
 `Float32` columns have half the bytes per value, so Polars' SIMD sum gets twice the throughput in
 values/s. `xsum` is compute-bound here at ~15 G values/s. Nulls are handled 64 values at a time
 from the validity bitmap and cost almost nothing.
 
-### `group_by(...).agg(...)`, n = 10^7
+A column in several chunks (e.g. after `concat` or from a multi-row-group Parquet file) is copied
+into one buffer before `xsum` sees it, because `xsum` works on the imploded column (see
+`group_by` below). The copy runs at memory speed (~5 ms per 10^7 values) and temporarily needs as
+much memory as the column. `rechunk()` the column once if it is summed repeatedly.
 
-| groups | `pl.sum` | `xsum` | ratio |
-|---:|---:|---:|---:|
-| 10 | 4.2 ms | 66.4 ms | 15.8× |
-| 1,000 | 26 ms | 58 ms | 2.2× |
-| 100,000 | 30 ms | 141 ms | 4.7× |
+### `group_by(...).agg(...)` and `over(...)`, n = 10^7
 
-This overhead is **not** the summation. Polars computes its built-in `sum` directly on the group
-indices. For any opaque aggregation, plugin or Python UDF alike, Polars first gathers every group
-into its own Series and then calls the function once per group. Replacing `xsum` with
-`map_batches(lambda s: s.sum(), returns_scalar=True)` costs the same ~66 ms for 10 groups. With
-many small groups the per-call cost of the plugin interface (~1 µs per group) adds up. Running the
-plugin single-threaded (`RAYON_NUM_THREADS=1`) does not change these numbers, so there is no
-thread oversubscription.
+| groups | keys | `pl.sum` | `sort().sum()` | `xsum` | ratio | `sum().over` | `xsum().over` | ratio |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 10 | random | 4.0 ms | 112 ms | 65.5 ms | 16.3× | 49.3 ms | 74.4 ms | 1.5× |
+| 10 | sorted | 15.1 ms | 74.8 ms | 20.0 ms | 1.3× | 9.5 ms | 18.3 ms | 1.9× |
+| 1,000 | random | 23.4 ms | 38.9 ms | 60.3 ms | 2.6× | 35.2 ms | 67.8 ms | 1.9× |
+| 1,000 | sorted | 15.6 ms | 28.1 ms | 20.1 ms | 1.3× | 9.3 ms | 18.1 ms | 1.9× |
+| 100,000 | random | 30.7 ms | 46.1 ms | 69.7 ms | 2.3× | 44.8 ms | 81.9 ms | 1.8× |
+| 100,000 | sorted | 20.6 ms | 30.2 ms | 22.8 ms | 1.1× | 14.2 ms | 19.9 ms | 1.4× |
+| 1,000,000 | random | 67.9 ms | 98.6 ms | 121 ms | 1.8× | 82.5 ms | 131 ms | 1.6× |
+| 1,000,000 | sorted | 74.6 ms | 87.8 ms | 34.2 ms | 0.5× | 62.2 ms | 27.7 ms | 0.4× |
+
+`xsum` sums all groups in **one** plugin call: it is an elementwise list sum of the imploded
+column, so Polars hands it one list per group. Before, with one call per group, `xsum` took
+142 ms at 10^5 groups and ~810 ms at 10^6 groups (random keys), and ~720 ms at 10^6 groups with
+sorted keys.
+
+The remaining overhead is **not** the summation. Polars computes its built-in `sum` directly on the
+group indices. For any other aggregation, plugin or Python UDF alike, Polars first gathers the
+values of every group, in a single thread. With random keys this costs ~60 ms per 10^7 values,
+whatever the number of groups. With sorted keys the groups are contiguous and the gather is cheap.
+
+**Overlapping windows** (`rolling`, `group_by_dynamic`) are gathered window by window, so time and
+memory grow with the window length. On 10^6 rows, a 1,000-row window takes 0.6–5 s and needs
+10.6 GB. `rolling_xsum` and `rolling_xsum_by` avoid this (see below).
+
+### Rolling sums
+
+| n | window | `rolling_sum` | `rolling_xsum` | ratio | `xsum` in `rolling(...)` |
+|---:|---:|---:|---:|---:|---:|
+| 10^6 | 10 | 4.45 ms | 7.83 ms | 1.8× | 25.4 ms |
+| 10^6 | 1,000 | 4.48 ms | 7.81 ms | 1.7× | 615 ms |
+| 10^6 | 100,000 | 4.41 ms | 12.0 ms | 2.7× | – |
+| 10^7 | 10 | 45.0 ms | 75.2 ms | 1.7× | 168 ms |
+| 10^7 | 1,000 | 44.8 ms | 71.8 ms | 1.6× | – |
+| 10^7 | 100,000 | 45.1 ms | 69.9 ms | 1.6× | – |
+
+`rolling_xsum` slides one exact accumulator over the column: it adds the value entering the window
+and subtracts the one leaving it. The cost per row is one addition, one subtraction and one
+rounding, whatever the window size. Long columns are split into blocks of at least one window,
+summed in parallel. Each block first sums the full window of its first row. That is why windows
+approaching the column length cost more: there are fewer blocks, and each starts with a long
+window. `xsum` in `rolling(...)` was measured only where the gathered windows fit in memory
+(n × window ≤ 10^9).
+
+### Rolling sums over a `Datetime` key
+
+One row per minute on average, with ties.
+
+| n | keys | window | `rolling_sum_by` | `rolling_xsum_by` | ratio |
+|---:|---|---:|---:|---:|---:|
+| 10^6 | sorted | 1h | 14.6 ms | 17.0 ms | 1.2× |
+| 10^6 | sorted | 7d | 15.8 ms | 17.7 ms | 1.1× |
+| 10^6 | unsorted | 1h | 22.5 ms | 29.7 ms | 1.3× |
+| 10^6 | unsorted | 7d | 23.5 ms | 29.3 ms | 1.2× |
+| 10^7 | sorted | 1h | 151 ms | 151 ms | 1.0× |
+| 10^7 | sorted | 7d | 162 ms | 170 ms | 1.0× |
+| 10^7 | unsorted | 1h | 425 ms | 382 ms | 0.9× |
+| 10^7 | unsorted | 7d | 473 ms | 398 ms | 0.8× |
+
+`rolling_xsum_by` is about as fast as Polars' inexact `rolling_sum_by` (run-to-run variation is
+±20% here). Polars computes the lower end of each window (`dt.offset_by`, so calendar durations
+and time zones are handled by Polars itself). The plugin sorts the rows by key if needed (in
+parallel), finds each window by binary search, and slides the same exact accumulator over the
+sorted rows. As with `rolling_xsum`, windows approaching the column length cost more, because the
+parallel blocks are at least one window long.
+
+In `over(...)`, Polars calls the plugin once per group. Small groups are summed on the calling
+thread; with 10^5 groups of 4 rows, `rolling_xsum_by(...).over(...)` takes 0.34 s against 0.13 s
+for `rolling_sum_by(...).over(...)`, which is the per-call overhead of the plugin interface.
