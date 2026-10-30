@@ -49,3 +49,35 @@ def test_follows_polars_max_threads(threads: int) -> None:
 def test_rayon_num_threads_overrides() -> None:
     env = {"POLARS_MAX_THREADS": "3", "RAYON_NUM_THREADS": "2"}
     assert pool_size_with(env) == 2
+
+
+ROLLING_SCRIPT = """
+import numpy as np
+import polars as pl
+from polars_xsum import rolling_xsum, rolling_xsum_by
+
+rng = np.random.default_rng(0)
+n = 200_000
+values = rng.standard_normal(n) * 10.0 ** rng.integers(-20, 20, n)
+df = pl.DataFrame({"t": rng.integers(0, n, n), "x": values})
+out = df.select(
+    fixed=rolling_xsum("x", 1000),
+    keyed=rolling_xsum_by("x", "t", "500i"),
+)
+print(out.select(pl.all().cast(pl.Float64).to_physical().hash()).sum().row(0))
+"""
+
+
+def test_rolling_sums_do_not_depend_on_threads() -> None:
+    def run(threads: str) -> str:
+        env = {k: v for k, v in os.environ.items() if k != "POLARS_MAX_THREADS"}
+        result = subprocess.run(  # noqa: S603 (trusted, fixed command)
+            [sys.executable, "-c", ROLLING_SCRIPT],
+            env=env | {"RAYON_NUM_THREADS": threads},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout
+
+    assert run("1") == run("7")

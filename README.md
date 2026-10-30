@@ -47,7 +47,30 @@ parallelised. `xsum` returns the exact sum rounded once to nearest (ties to even
 | exact zero | `+0.0` |
 
 `xsum` is a scalar aggregation. It works in `select`, `with_columns` (broadcast),
-`group_by(...).agg(...)`, `over(...)`, and in lazy and streaming queries.
+`group_by(...).agg(...)`, `over(...)`, and in lazy and streaming queries. In `group_by` and
+`over`, a single plugin call sums all groups. With overlapping windows (`rolling`,
+`group_by_dynamic`), Polars gathers every window first, so memory grows with the number of rows
+times the window length.
+
+### Rolling sums
+
+`rolling_xsum(expr, window_size, *, min_samples=None, center=False)` is the exact counterpart of
+`pl.col(...).rolling_sum(...)`: every window of `window_size` rows is summed exactly and rounded
+once, with the rules above. A single accumulator slides over the column, adding the value that
+enters the window and subtracting the one that leaves it. Both steps are exact, so the cost per
+row does not depend on the window size: ~1.7× the time of the inexact `rolling_sum`, more for
+windows approaching the column length (see [BENCHMARKS.md](BENCHMARKS.md)).
+
+`rolling_xsum_by(expr, by, window_size, *, min_samples=0, closed="right")` is the exact
+counterpart of `pl.col(...).rolling_sum_by(...)`: the window of a row holds the rows whose key lies
+in `(key - window_size, key]`. The key is an integer column (`window_size="3i"`) or a `Date` or
+`Datetime` column, with a duration such as `"2d"`, `"1mo"` or a `timedelta`; calendar units and
+time zones follow `dt.offset_by`. The key need not be sorted. This is about as fast as the
+inexact `rolling_sum_by`, except for windows approaching the column length. The default
+`min_samples=0` follows Polars 2 (Polars 1 defaults to 1).
+
+For one sum per row, prefer these two to `xsum` in `rolling(...)`, which gathers every window
+first. `xsum` remains the choice for `group_by_dynamic(...)`, which gives one row per window.
 
 ## Threading
 
@@ -62,12 +85,13 @@ sized exactly like Polars' pool:
 
 `polars_xsum.thread_pool_size()` reports the size. While the pool works, the calling Polars
 thread sleeps, so concurrent `xsum` expressions share the pool instead of oversubscribing the CPU.
-Shorter columns, such as typical `group_by` groups, are summed on the calling Polars thread. The
-result is bit-identical for any number of threads.
+The groups of a `group_by` or `over` are summed in parallel when they hold at least 32Ki values
+in total. Shorter inputs are summed on the calling Polars thread. The result is bit-identical for
+any number of threads.
 
 ## Installation and development
 
-Supported versions: Python ≥ 3.11 and Polars ≥ 1.0 (the full test suite passes from Polars 1.0.0
+Supported versions: Python ≥ 3.11 and Polars ≥ 1.28 (the full test suite passes from Polars 1.28.0
 to the latest release; CI checks both ends). Building from source requires Rust ≥ 1.95 and
 [uv](https://docs.astral.sh/uv/).
 
@@ -99,7 +123,7 @@ uv run ty check                                         # Astral's type checker
 * **Rust:** formatting, clippy (`-D warnings`), tests and docs, plus a build with the minimum
   supported Rust version (1.95).
 * **Python:** ruff and ty, and the test suite on Linux, macOS and Windows with Python 3.11 and
-  3.14, plus a run against the oldest supported Polars (1.0.0).
+  3.14, plus a run against the oldest supported Polars (1.28.0).
 * **Wheels:** abi3 wheels for Linux (x86_64 and aarch64, manylinux), Windows x64 and macOS
   (x86_64 and arm64), plus an sdist. The test suite then runs against the *installed* wheels on
   each native platform (including Intel macOS), and against a build from the sdist.
@@ -158,7 +182,7 @@ Every finite double is an integer multiple of `2^-1075`, so a sum of doubles is 
   provably correctly rounded.
 * **Parallelism**: accumulators merge exactly, so long columns (≥ 32Ki values) are split into
   blocks that are summed on all cores with rayon. The result is bit-identical to the sequential
-  sum. Short columns (e.g. `group_by` groups) use the small accumulator on the calling thread.
+  sum. Short columns (e.g. `group_by` groups) use the small accumulator.
   Large accumulators are cleared and reused through a small per-thread cache (≤ 2 × 160 KiB per
   thread). This avoids paying allocation and page-fault costs on every call.
 * **No `unsafe`**: `xsum-core` is `#![forbid(unsafe_code)]`. In the plugin crate, the only unsafe

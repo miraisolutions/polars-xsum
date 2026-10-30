@@ -8,6 +8,7 @@
 mod column;
 mod expressions;
 mod pool;
+mod rolling;
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;

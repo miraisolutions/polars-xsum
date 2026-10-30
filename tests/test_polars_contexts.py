@@ -87,3 +87,46 @@ def test_group_by_float32() -> None:
     out = df.group_by("g", maintain_order=True).agg(xsum("x"))
     assert out.schema["x"] == pl.Float32
     assert out["x"].to_list() == [1.0, 2.0**-60]
+
+
+def test_nested_expressions_in_agg(grouped: pl.DataFrame) -> None:
+    out = grouped.group_by("g", maintain_order=True).agg(
+        filtered=xsum(pl.col("y").filter(pl.col("y") > 0.25)),
+        scaled=xsum(pl.col("y") * 10.0),
+        empty=xsum(pl.col("y").filter(pl.col("y") > 1.0)),
+    )
+    assert out["filtered"].to_list() == [0.3 + 0.6, 0.5, 0.4, 0.7 + 0.8]
+    assert out["scaled"].to_list() == [10.0, 7.0, 4.0, 15.0]
+    assert out["empty"].to_list() == [0.0] * 4
+
+
+def test_over_with_sorted_and_multiple_keys() -> None:
+    df = pl.DataFrame(
+        {
+            "k1": [1, 1, 1, 2, 2, 2],
+            "k2": ["a", "b", "a", "a", "a", None],
+            "x": [1e100, 2.0, -1e100, 0.1, 0.2, 0.3],
+        }
+    )
+    out = df.with_columns(t1=xsum("x").over("k1"), t2=xsum("x").over("k1", "k2"))
+    assert out["t1"].to_list() == [2.0] * 3 + [expected_sum([0.1, 0.2, 0.3])] * 3
+    pair = expected_sum([0.1, 0.2])
+    assert out["t2"].to_list() == [0.0, 2.0, 0.0, pair, pair, 0.3]
+
+
+def test_rolling() -> None:
+    values = [1e100, 1.0, -1e100, 0.1, None, 0.2, 0.3, math.inf, 1.0]
+    df = pl.DataFrame({"t": range(len(values)), "x": values})
+    out = df.rolling("t", period="3i").agg(xsum("x"))
+    expected = [expected_sum(values[max(0, i - 2) : i + 1]) for i in range(len(values))]
+    assert all(map(same_float, out["x"].to_list(), expected))
+    windowed = df.with_columns(w=xsum("x").rolling("t", period="3i"))
+    assert all(map(same_float, windowed["w"].to_list(), expected))
+
+
+def test_group_by_dynamic() -> None:
+    values = [1e100, 1.0, -1e100, 0.1, None, 0.2, 0.3]
+    df = pl.DataFrame({"t": range(len(values)), "x": values})
+    out = df.group_by_dynamic("t", every="2i", period="4i").agg(xsum("x"))
+    expected = [expected_sum(values[start : start + 4]) for start in out["t"].to_list()]
+    assert all(map(same_float, out["x"].to_list(), expected))
