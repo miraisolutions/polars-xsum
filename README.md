@@ -62,7 +62,7 @@ Windows (x64) and macOS (x86_64 and arm64). On other platforms, such as Alpine L
 | `Float32` column | `Float32`, rounded directly from the exact sum (no double rounding through `Float64`) |
 | any other dtype (integers, `Float16`, `Decimal`, …) | `ComputeError`; cast explicitly to opt in |
 | nulls | skipped; an empty or all-null column gives `0.0` (like `pl.sum`) |
-| any NaN | NaN (the payload of the first NaN is kept) |
+| any NaN | NaN (for `Float64`, the payload of the first NaN is kept) |
 | both `+inf` and `-inf` | NaN |
 | otherwise an infinity | that infinity |
 | exact sum beyond the finite range | `±inf` (incl. the tie at `MAX + ½ ulp`, as in IEEE-754) |

@@ -16,6 +16,8 @@ missing_docs = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# Document private items too: most of polars-xsum is private.
+missing_docs_in_private_items = "warn"
 # Bit-level float manipulation needs many deliberate integer casts.
 cast_possible_truncation = "allow"
 cast_possible_wrap = "allow"

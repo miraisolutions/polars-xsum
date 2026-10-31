@@ -52,9 +52,13 @@ impl Window {
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Closed {
+    /// Only the lower end: `[lower, key)`.
     Left,
+    /// Only the upper end: `(lower, key]`.
     Right,
+    /// Both ends: `[lower, key]`.
     Both,
+    /// Neither end: `(lower, key)`.
     None,
 }
 
@@ -76,8 +80,24 @@ pub(crate) struct KeyWindow {
     pub(crate) window_size: Option<u64>,
 }
 
-/// Exact sum of every window of `ca`, rounded with `round`. A window with
-/// fewer than `window.min_samples` non-null values gives null.
+/// Sums every window of rows of `ca` exactly, as `rolling_xsum` does.
+///
+/// # Arguments
+///
+/// * `ca` - The values. Nulls are skipped.
+/// * `window` - The size and position of the windows, and the number of
+///   non-null values a window needs.
+/// * `round` - Rounds an exact sum to `T` (`SmallAccumulator::to_f32` or
+///   `SmallAccumulator::to_f64`).
+///
+/// # Returns
+///
+/// One sum per row of `ca`, with the name of `ca`. A window with fewer than
+/// `window.min_samples` non-null values gives null.
+///
+/// # Errors
+///
+/// Fails if `window.min_samples` exceeds `window.size`.
 pub(crate) fn exact_rolling_sums<T>(
     ca: &ChunkedArray<T>,
     window: Window,
@@ -111,13 +131,35 @@ where
     ))
 }
 
-/// Exact sum of every window of `ca` over the key column `keys`, rounded with
-/// `round`.
+/// Sums every window of `ca` over a key column exactly, as `rolling_xsum_by`
+/// does.
 ///
-/// `keys` holds the physical (integer) values of the key column, and `lower`
-/// those of each row's lower window end when `window.window_size` is `None`.
-/// Rows with a null key give null and belong to no window; a null lower end
-/// gives null too. `keys` need not be sorted.
+/// The rows are sorted by key unless they already are. The window slides over
+/// them in that order, and the sums are put back into the original row order.
+///
+/// # Arguments
+///
+/// * `ca` - The values. Nulls are skipped.
+/// * `keys` - The physical (integer) values of the key column, which need not
+///   be sorted. A row with a null key belongs to no window.
+/// * `lower` - The physical values of each row's lower window end, as computed
+///   by Polars for a duration window. Used only when `window.window_size` is
+///   `None`.
+/// * `window` - Which ends of the window interval are included, the window
+///   size of an integer key column, and the number of non-null values a
+///   window needs.
+/// * `round` - Rounds an exact sum to `T` (`SmallAccumulator::to_f32` or
+///   `SmallAccumulator::to_f64`).
+///
+/// # Returns
+///
+/// One sum per row of `ca`, in its original order and with its name. A row
+/// gives null if its key or its lower end is null, or if its window has fewer
+/// than `window.min_samples` non-null values.
+///
+/// # Errors
+///
+/// Fails if `keys` or `lower` differ in length from `ca`.
 pub(crate) fn exact_rolling_sums_by<T>(
     ca: &ChunkedArray<T>,
     keys: &Int64Chunked,
@@ -131,11 +173,19 @@ where
 {
     let len = ca.len();
     polars_ensure!(
-        keys.len() == len && lower.is_none_or(|lower| lower.len() == len),
+        keys.len() == len,
         ShapeMismatch: "rolling_xsum_by: the values ({len}) and the key column ({}) must have \
                         the same length",
         keys.len()
     );
+    if let Some(lower) = lower {
+        polars_ensure!(
+            lower.len() == len,
+            ShapeMismatch: "rolling_xsum_by: the values ({len}) and the lower window ends ({}) \
+                            must have the same length",
+            lower.len()
+        );
+    }
     let (ca, keys) = (ca.rechunk(), keys.rechunk());
     let lower = lower.map(ChunkedArray::rechunk);
     let (Some(array), Some(keys)) = (ca.downcast_iter().next(), keys.downcast_iter().next()) else {
@@ -228,13 +278,30 @@ where
     ))
 }
 
-/// The rounded exact sum of the window `bounds(row)` of every row of `array`,
-/// or null where a window has fewer than `min_samples` non-null values.
-/// `longest` is the length of the longest window.
+/// Sums the window of every row of `array` exactly, sliding one accumulator
+/// over the rows.
 ///
 /// Long columns are split into blocks of rows that are summed in parallel on
-/// the plugin's thread pool. Each block starts with the full window of its
-/// first row, so blocks are at least as long as the longest window.
+/// the plugin's thread pool. Each block first sums the full window of its first
+/// row from scratch. Blocks are at least as long as the longest window, which
+/// bounds that extra work to at most doubling the total.
+///
+/// # Arguments
+///
+/// * `array` - The values, in the order in which the window slides over them.
+/// * `bounds` - The window of a row, as the rows `start..end` of `array`. Both
+///   ends may move in either direction from one row to the next; the cost
+///   grows with how far they move.
+/// * `longest` - The length of the longest window. Blocks are at least this
+///   long.
+/// * `min_samples` - The number of non-null values a window needs for a
+///   non-null sum.
+/// * `round` - Rounds an exact sum to the output type.
+///
+/// # Returns
+///
+/// One sum per row of `array`, in row order: `None` where the window has
+/// fewer than `min_samples` non-null values.
 fn slide<T, N>(
     array: &PrimitiveArray<T>,
     bounds: impl Fn(usize) -> (usize, usize) + Sync,
@@ -278,22 +345,29 @@ where
 /// Whether a row enters or leaves the window.
 #[derive(Clone, Copy)]
 enum Step {
+    /// The row joins the window; its value is added.
     Enter,
+    /// The row leaves the window; its value is subtracted.
     Leave,
 }
 
 /// Which end of the window a row enters or leaves by.
 #[derive(Clone, Copy)]
 enum End {
+    /// The lower end, `lo`.
     Low,
+    /// The upper end, `hi`.
     High,
 }
 
 /// The exact sum of the rows `lo..hi` of an array, for a window that moves in
 /// either direction.
 struct Sliding<'a, T: NativeType> {
+    /// The values the window slides over.
     array: &'a PrimitiveArray<T>,
+    /// First row of the window.
     lo: usize,
+    /// One past the last row of the window.
     hi: usize,
     /// Sum of the finite values in the window.
     acc: SmallAccumulator,
@@ -301,12 +375,14 @@ struct Sliding<'a, T: NativeType> {
     count: usize,
     /// Rows of the NaNs in the window, in order.
     nans: VecDeque<usize>,
+    /// Number of `+∞` values in the window.
     positive_infinities: usize,
+    /// Number of `−∞` values in the window.
     negative_infinities: usize,
 }
 
 impl<'a, T: NativeType + Into<f64>> Sliding<'a, T> {
-    /// An empty window at `start`.
+    /// An empty window over `array`, at row `start`.
     fn new(array: &'a PrimitiveArray<T>, start: usize) -> Self {
         Self {
             array,
@@ -383,7 +459,9 @@ impl<'a, T: NativeType + Into<f64>> Sliding<'a, T> {
     /// `min_samples` non-null values.
     ///
     /// Special values follow `xsum`: the first NaN wins, and infinities of
-    /// both signs give NaN.
+    /// both signs give NaN. "First" refers to the order the window slides in,
+    /// which for `rolling_xsum_by` with unsorted keys is the key order, not
+    /// the row order.
     fn sum<N>(&self, min_samples: usize, round: impl Fn(&SmallAccumulator) -> N) -> Option<N> {
         if self.count < min_samples {
             return None;
@@ -494,6 +572,25 @@ mod tests {
                 "row {row}"
             );
         }
+    }
+
+    #[test]
+    fn length_mismatches_name_the_offending_column() {
+        let ca = Float64Chunked::from_slice("x".into(), &[1.0, 2.0]);
+        let keys = Int64Chunked::from_slice("t".into(), &[1, 2]);
+        let window = KeyWindow {
+            min_samples: 0,
+            closed: Closed::Right,
+            window_size: None,
+        };
+        let error = |keys: &Int64Chunked, lower: &Int64Chunked| {
+            exact_rolling_sums_by(&ca, keys, Some(lower), window, SmallAccumulator::to_f64)
+                .unwrap_err()
+                .to_string()
+        };
+        let short = Int64Chunked::from_slice("l".into(), &[0]);
+        assert!(error(&short, &keys).contains("the key column (1)"));
+        assert!(error(&keys, &short).contains("the lower window ends (1)"));
     }
 
     #[test]

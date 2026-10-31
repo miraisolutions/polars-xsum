@@ -14,6 +14,7 @@ cargo test --workspace     # Rust unit, integration, property and doc tests
 cargo bench -p xsum-core   # criterion benchmarks (see BENCHMARKS.md)
 uv run python benchmarks/bench_polars.py
 uv run --group docs sphinx-build -W --keep-going -n docs docs/_build/html   # documentation
+cargo doc --workspace --no-deps --document-private-items --open           # Rust API docs
 ```
 
 The documentation (`docs/`) is built with Sphinx. Most of its text is included from `README.md`,

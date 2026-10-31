@@ -36,11 +36,15 @@ pub(crate) fn finish(mut acc: LargeAccumulator) -> SmallAccumulator {
     sum
 }
 
-/// Sums the values that `feed` adds to a [`LargeAccumulator`], and returns the
-/// exact sum.
+/// Sums the values that `feed` adds to a [`LargeAccumulator`].
 ///
 /// The accumulator comes from a per-thread cache, so repeated calls avoid the
 /// cost of allocating and first touching a large accumulator.
+///
+/// # Returns
+///
+/// The exact sum, unrounded: [`SmallAccumulator::to_f64`] or
+/// [`SmallAccumulator::to_f32`] rounds it.
 ///
 /// # Examples
 ///

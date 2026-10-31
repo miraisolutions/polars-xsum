@@ -27,13 +27,13 @@ pub(crate) const MAX_FINITE_EXP: u64 = EXP_SPECIAL - 1;
 /// Sign bit of an `f64` bit pattern.
 pub(crate) const SIGN_BIT: u64 = 1 << 63;
 
-/// Returns the biased exponent field of an `f64` bit pattern.
+/// Returns the biased exponent field of the `f64` bit pattern `bits`.
 #[inline]
 pub(crate) const fn biased_exp(bits: u64) -> u64 {
     (bits >> MANTISSA_BITS) & EXP_MASK
 }
 
-/// Returns `true` if the bit pattern encodes an infinity or a NaN.
+/// Returns `true` if the bit pattern `bits` encodes an infinity or a NaN.
 #[inline]
 pub(crate) const fn is_special(bits: u64) -> bool {
     biased_exp(bits) == EXP_SPECIAL
@@ -52,7 +52,7 @@ pub(crate) struct Decomposed {
 }
 
 impl Decomposed {
-    /// Decomposes the bit pattern of a *finite* `f64`.
+    /// Decomposes `bits`, the bit pattern of a *finite* `f64`.
     ///
     /// Zeros yield a zero significand. Must not be called for infinities or
     /// NaNs (checked in debug builds).

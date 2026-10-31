@@ -25,7 +25,8 @@ pub(crate) enum Rounding {
     Odd,
 }
 
-/// Rounds the value represented by `digits` (in any carry state) to `f64`.
+/// Rounds the value represented by `digits` (in any carry state) to `f64`
+/// with the rounding mode `mode`.
 ///
 /// An exact zero yields `+0.0`.
 pub(crate) fn round_digits(mut digits: [i64; NUM_DIGITS], mode: Rounding) -> f64 {
@@ -47,6 +48,7 @@ pub(crate) fn round_digits(mut digits: [i64; NUM_DIGITS], mode: Rounding) -> f64
 
 /// A non-negative integer as little-endian base-`2^32` digits.
 struct Magnitude {
+    /// The digits, least significant first, each in `[0, 2^32)`.
     digits: [u32; NUM_DIGITS + 1],
 }
 
@@ -94,8 +96,8 @@ impl Magnitude {
         self.digits[..full].iter().any(|&d| d != 0) || self.digits[full] & partial_mask != 0
     }
 
-    /// Rounds `self · 2^-1075` to an `f64` and returns its (unsigned) bit
-    /// pattern.
+    /// Rounds `self · 2^-1075` to an `f64` with the rounding mode `mode` and
+    /// returns its (unsigned) bit pattern.
     fn round(&self, mode: Rounding) -> u64 {
         let len = self.bit_len();
         if len == 0 {

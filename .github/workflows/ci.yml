@@ -59,7 +59,17 @@ jobs:
       - run: cargo test --workspace --release --locked
         env:
           PROPTEST_CASES: "1000"
-      - run: cargo doc --workspace --no-deps --locked
+      # xsum-core without its default `parallel` feature (the integration tests
+      # and benchmarks require it and are skipped).
+      - run: |
+          cargo clippy -p xsum-core --no-default-features --all-targets --locked -- -D warnings
+          cargo test -p xsum-core --no-default-features --locked
+      # Public items, private items (most of polars-xsum is private), and
+      # xsum-core without its default `parallel` feature.
+      - run: |
+          cargo doc --workspace --no-deps --locked
+          cargo doc --workspace --no-deps --locked --document-private-items
+          cargo doc -p xsum-core --no-deps --locked --no-default-features
         env:
           RUSTDOCFLAGS: -Dwarnings
 

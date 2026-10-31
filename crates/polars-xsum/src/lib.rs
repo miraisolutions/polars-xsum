@@ -21,6 +21,9 @@ use pyo3_polars::PolarsAllocator;
 #[global_allocator]
 static ALLOC: PolarsAllocator = PolarsAllocator::new();
 
+// pyo3 turns this doc comment into the Python docstring of
+// `polars_xsum.thread_pool_size`, which Sphinx renders in the API reference;
+// hence the reStructuredText markup.
 /// Returns the number of threads of the plugin's thread pool.
 ///
 /// ``xsum``, ``rolling_xsum`` and ``rolling_xsum_by`` use this pool for long
@@ -36,6 +39,10 @@ fn thread_pool_size() -> usize {
 }
 
 /// The compiled extension module `polars_xsum._internal`.
+///
+/// # Errors
+///
+/// Fails if `__version__` or `thread_pool_size` cannot be added to the module.
 #[pymodule]
 fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

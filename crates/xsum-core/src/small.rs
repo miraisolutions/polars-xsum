@@ -61,7 +61,7 @@ impl Special {
         negative_infinity: false,
     };
 
-    /// Records the bit pattern of an infinity or NaN.
+    /// Returns `self` with the infinity or NaN `bits` (a bit pattern) recorded.
     #[must_use]
     pub(crate) fn absorb(self, bits: u64) -> Self {
         debug_assert!(is_special(bits));
@@ -86,7 +86,8 @@ impl Special {
         }
     }
 
-    /// The overall result if it is an infinity or NaN.
+    /// The overall result if it is an infinity or NaN, `None` if no infinity or
+    /// NaN has been added.
     ///
     /// The first NaN wins (keeping its payload). Without NaNs, infinities of
     /// both signs give the default NaN.
@@ -241,9 +242,16 @@ impl SmallAccumulator {
         wide as f32
     }
 
-    /// Adds `±magnitude · 2^(exponent − 1075)` for a magnitude below `2^96`.
+    /// Adds `±magnitude · 2^(exponent − 1075)`.
     ///
     /// Used by the large accumulator to transfer pre-summed chunks.
+    ///
+    /// # Arguments
+    ///
+    /// * `magnitude` - A sum of significands, below `2^96`.
+    /// * `exponent` - The biased exponent the significands share, in
+    ///   `1..=2046` (1 for subnormals).
+    /// * `negative` - Whether the value is subtracted.
     pub(crate) fn add_scaled(&mut self, magnitude: u128, exponent: u32, negative: bool) {
         debug_assert!(magnitude < 1 << 96);
         if self.adds_until_propagate == 0 {
@@ -264,12 +272,13 @@ impl SmallAccumulator {
         }
     }
 
-    /// Records an infinity or NaN.
+    /// Records the infinity or NaN with bit pattern `bits`.
     pub(crate) fn add_special(&mut self, bits: u64) {
         self.special = self.special.absorb(bits);
     }
 
-    /// Adds a value without checking the carry budget.
+    /// Adds the value with bit pattern `bits` without checking the carry
+    /// budget.
     #[inline]
     fn add_bits_unchecked(&mut self, bits: u64) {
         if is_special(bits) {
@@ -279,11 +288,11 @@ impl SmallAccumulator {
         }
     }
 
-    /// Adds a finite value given by its bit pattern.
+    /// Adds the finite value with bit pattern `bits`.
     ///
-    /// The significand `m < 2^53` is shifted left by `s = e mod 32`, giving a
-    /// number below `2^85` that is split into a low part (`< 2^32`) for digit
-    /// `e / 32` and a high part (`< 2^53`) for the digit above.
+    /// The significand `m < 2^53` is shifted left by `s = e mod 32 ≤ 31`,
+    /// giving a number below `2^84` that is split into a low part (`< 2^32`)
+    /// for digit `e / 32` and a high part (`< 2^52`) for the digit above.
     #[inline]
     fn add_finite_bits(&mut self, bits: u64) {
         let Decomposed {
@@ -300,6 +309,7 @@ impl SmallAccumulator {
         self.digits[index + 1] += high;
     }
 
+    /// Propagates the carries and resets the carry budget.
     fn propagate(&mut self) {
         propagate_carries(&mut self.digits);
         self.adds_until_propagate = ADDS_BETWEEN_PROPAGATIONS;
