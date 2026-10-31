@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prints the CHANGELOG.md section of a release, i.e. the lines below the
-# heading "## [VERSION] - YYYY-MM-DD" up to the next "## " heading.
+# heading "## [VERSION] - YYYY-MM-DD" up to the next "## " heading or the link
+# definitions ("[X.Y.Z]: https://...") at the bottom of the file.
 #
 # Fails if there is no such section or if it is empty, so that a release
 # cannot be published without its changelog entry.
@@ -18,6 +19,7 @@ notes=$(awk -v heading="## [${version}] - " '
     found = index($0, heading) == 1 && date ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/
     next
   }
+  found && /^\[.*\]: / { exit }
   found { print }
 ' "${changelog}" | sed '/[^[:space:]]/,$!d')
 

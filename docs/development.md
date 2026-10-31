@@ -1,6 +1,5 @@
 # Development and releases
 
-```{include} ../README.md
-:start-after: <!-- docs:development -->
-:end-before: <!-- docs:internals -->
+```{include} ../CONTRIBUTING.md
+:start-after: <!-- docs:start -->
 ```

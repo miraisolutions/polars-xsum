@@ -2,5 +2,5 @@
 
 ```{include} ../README.md
 :start-after: <!-- docs:guide -->
-:end-before: <!-- docs:development -->
+:end-before: <!-- docs:internals -->
 ```

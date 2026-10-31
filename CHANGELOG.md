@@ -4,8 +4,9 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/).
 
-When releasing, rename the `Unreleased` section to `[X.Y.Z] - YYYY-MM-DD`. The release workflow
-refuses to publish a tag without such a section, and uses it as the notes of the GitHub release.
+<!-- When releasing, rename the `Unreleased` section to `[X.Y.Z] - YYYY-MM-DD` and update the
+link definitions at the bottom (see CONTRIBUTING.md). The release workflow refuses to publish a tag
+without such a section, and uses it as the notes of the GitHub release. -->
 
 ## [Unreleased]
 
@@ -25,3 +26,5 @@ First release.
   `POLARS_MAX_THREADS` (overridable with `RAYON_NUM_THREADS`).
 - abi3 wheels for Python ≥ 3.11 on Linux (x86_64 and aarch64), Windows (x64) and macOS (x86_64
   and arm64). Requires Polars ≥ 1.28.
+
+[Unreleased]: https://github.com/miraisolutions/polars-xsum/commits/main/

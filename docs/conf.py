@@ -7,6 +7,7 @@ from the docstrings of the installed package.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from docutils import nodes
@@ -14,6 +15,8 @@ from docutils import nodes
 from polars_xsum import __version__
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sphinx.application import Sphinx
     from sphinx.environment import BuildEnvironment
 
@@ -83,6 +86,44 @@ def _link_polars_class(
     return nodes.reference("", "", contnode, internal=False, refuri=uri)
 
 
+# -- Links to this site in included files --------------------------------------
+# README.md is also the PyPI description, so it links to these pages with
+# absolute URLs. Turn them into links between the pages (checked by the build),
+# e.g. `(https://.../polars-xsum/BENCHMARKS.html#setup)` -> `(BENCHMARKS.md#setup)`.
+_SITE_LINK = re.compile(
+    r"\]\(https://miraisolutions\.github\.io/polars-xsum/([\w-]+)\.html(#[\w-]+)?\)"
+)
+
+
+def _localize_site_links(_app: Sphinx, _path: Path, _docname: str, content: list[str]) -> None:
+    """Rewrite absolute links to this documentation site in an included file."""
+    content[0] = _SITE_LINK.sub(r"](\1.md\2)", content[0])
+
+
+# -- Return types of compiled functions ----------------------------------------
+# Functions of the compiled extension carry no annotations at runtime; their
+# types are in `_internal.pyi`.
+_RETURN_TYPES = {"polars_xsum.thread_pool_size": "int"}
+
+
+def _add_return_type(
+    _app: Sphinx,
+    _what: str,
+    name: str,
+    _obj: object,
+    _options: object,
+    signature: str | None,
+    _return_annotation: str | None,
+) -> tuple[str | None, str] | None:
+    """Show the return type of a function of the compiled extension."""
+    if name not in _RETURN_TYPES:
+        return None  # Leave the signature to the other handlers.
+    return signature, _RETURN_TYPES[name]
+
+
 def setup(app: Sphinx) -> None:
-    """Register the handler for links to Polars classes."""
+    """Register the event handlers."""
     app.connect("missing-reference", _link_polars_class)
+    app.connect("include-read", _localize_site_links)
+    # Before numpydoc's handler, which would otherwise decide the signature.
+    app.connect("autodoc-process-signature", _add_return_type, priority=400)

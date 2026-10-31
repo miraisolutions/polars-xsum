@@ -1,15 +1,16 @@
 # polars-xsum
 
 **[Documentation](https://miraisolutions.github.io/polars-xsum/)** ·
-[Changelog](CHANGELOG.md) ·
-[Benchmarks](BENCHMARKS.md)
+[Changelog](https://miraisolutions.github.io/polars-xsum/changelog.html) ·
+[Benchmarks](https://miraisolutions.github.io/polars-xsum/BENCHMARKS.html)
 
-<!-- The docs/ pages include the sections between the "docs:" markers. -->
+<!-- The docs/ pages include the sections between the "docs:" markers. Links use absolute URLs,
+so that they also work on PyPI; the docs build turns links to the docs site into internal links. -->
 <!-- docs:intro -->
 
 **Exact, correctly rounded summation of floating-point columns for [Polars](https://pola.rs).**
 
-`polars-xsum` is a Polars expression plugin that provides `xsum`, a drop-in replacement for
+`polars-xsum` is a Polars expression plugin that provides `xsum`, an exact replacement for
 `pl.col(...).sum()` on float columns. It computes the **exact** sum of all values and rounds only
 once at the end. It does this using an independent Rust implementation of
 Radford M. Neal's *small and large superaccumulators*
@@ -45,10 +46,11 @@ parallelised. `xsum` returns the exact sum rounded once to nearest (ties to even
 pip install polars-xsum    # or: uv add polars-xsum
 ```
 
-Supported versions: Python ≥ 3.11 and Polars ≥ 1.28 (the full test suite passes from Polars 1.28.0
-to the latest release; CI checks both ends). Wheels are available for Linux (x86_64 and aarch64),
-Windows (x64) and macOS (x86_64 and arm64). On other platforms, `pip` builds the package from
-source, which requires Rust ≥ 1.95.
+Supported versions: Python ≥ 3.11 and Polars ≥ 1.28. CI runs the full test suite against the
+oldest supported Polars (1.28.0) and against the version pinned in `uv.lock`, which Dependabot
+keeps current. Wheels are available for Linux with glibc (manylinux; x86_64 and aarch64),
+Windows (x64) and macOS (x86_64 and arm64). On other platforms, such as Alpine Linux (musl),
+`pip` builds the package from source, which requires Rust ≥ 1.95.
 
 <!-- docs:guide -->
 
@@ -61,7 +63,7 @@ source, which requires Rust ≥ 1.95.
 | any other dtype (integers, `Float16`, `Decimal`, …) | `ComputeError`; cast explicitly to opt in |
 | nulls | skipped; an empty or all-null column gives `0.0` (like `pl.sum`) |
 | any NaN | NaN (the payload of the first NaN is kept) |
-| `+inf` and `-inf` | NaN |
+| both `+inf` and `-inf` | NaN |
 | otherwise an infinity | that infinity |
 | exact sum beyond the finite range | `±inf` (incl. the tie at `MAX + ½ ulp`, as in IEEE-754) |
 | exact zero | `+0.0` |
@@ -72,6 +74,14 @@ source, which requires Rust ≥ 1.95.
 `group_by_dynamic`), Polars gathers every window first, so memory grows with the number of rows
 times the window length.
 
+`xsum` also accepts a column name or a `Series`. To sum a `Series` directly, select the
+expression:
+
+```python
+s = pl.Series([1e100, 1.0, -1e100])
+pl.select(xsum(s)).item()  # 1.0
+```
+
 ### Rolling sums
 
 `rolling_xsum(expr, window_size, *, min_samples=None, center=False)` is the exact counterpart of
@@ -79,18 +89,24 @@ times the window length.
 once, with the rules above. A single accumulator slides over the column, adding the value that
 enters the window and subtracting the one that leaves it. Both steps are exact, so the cost per
 row does not depend on the window size: ~1.7× the time of the inexact `rolling_sum`, more for
-windows approaching the column length (see [BENCHMARKS.md](BENCHMARKS.md)).
+windows approaching the column length (see
+[Benchmarks](https://miraisolutions.github.io/polars-xsum/BENCHMARKS.html)).
 
 `rolling_xsum_by(expr, by, window_size, *, min_samples=0, closed="right")` is the exact
-counterpart of `pl.col(...).rolling_sum_by(...)`: the window of a row holds the rows whose key lies
-in `(key - window_size, key]`. The key is an integer column (`window_size="3i"`) or a `Date` or
-`Datetime` column, with a duration such as `"2d"`, `"1mo"` or a `timedelta`; calendar units and
-time zones follow `dt.offset_by`. The key need not be sorted. This is about as fast as the
+counterpart of `pl.col(...).rolling_sum_by(...)`: with the default `closed="right"`, the window of
+a row holds the rows whose key lies in `(key - window_size, key]`. The key is an integer column
+(`window_size="3i"`) or a `Date` or `Datetime` column, with a duration such as `"2d"`, `"1mo"` or
+a `timedelta`; calendar units and time zones follow `dt.offset_by`. The key need not be sorted. This is about as fast as the
 inexact `rolling_sum_by`, except for windows approaching the column length. The default
 `min_samples=0` follows Polars 2 (Polars 1 defaults to 1).
 
 For one sum per row, prefer these two to `xsum` in `rolling(...)`, which gathers every window
 first. `xsum` remains the choice for `group_by_dynamic(...)`, which gives one row per window.
+
+In `over(...)`, the windows of both functions stay within each group. Unlike `xsum`, which sums
+all groups in one plugin call, they are called once per group, so with many small groups the
+per-call overhead dominates: with 10^5 groups of 4 rows, they take about 2.5× the time of their
+inexact counterparts.
 
 ## Threading
 
@@ -109,104 +125,26 @@ The groups of a `group_by` or `over` are summed in parallel when they hold at le
 in total. Shorter inputs are summed on the calling Polars thread. The result is bit-identical for
 any number of threads.
 
-<!-- docs:development -->
+## Not supported
 
-## Development
-
-Development requires Rust ≥ 1.95 and [uv](https://docs.astral.sh/uv/).
-
-```bash
-uv sync                    # creates .venv and builds the extension (release mode)
-uv run pytest              # Python test suite (incl. doctests and Hypothesis properties)
-cargo test --workspace     # Rust unit, integration, property and doc tests
-cargo bench -p xsum-core   # criterion benchmarks (see BENCHMARKS.md)
-uv run python benchmarks/bench_polars.py
-uv run --group docs sphinx-build -W --keep-going -n docs docs/_build/html   # documentation
-```
-
-The documentation (`docs/`) is built with Sphinx. Most of its text is included from this README,
-`BENCHMARKS.md` and `CHANGELOG.md`; the API reference comes from the docstrings. Open
-`docs/_build/html/index.html` to view it.
-
-After changing Rust code, `uv sync --reinstall-package polars-xsum` rebuilds the extension.
-`uv run` also rebuilds it automatically when sources change. `uv run maturin develop --release`
-works too.
-
-Quality gates:
-
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings   # clippy::pedantic enabled
-uv run ruff format --check . && uv run ruff check .     # ruff with all rules
-uv run ty check                                         # Astral's type checker
-```
-
-## Continuous integration and releases
-
-`.github/workflows/ci.yml` runs on every push and pull request:
-
-* **Rust:** formatting, clippy (`-D warnings`), tests and docs, plus a build with the minimum
-  supported Rust version (1.95).
-* **Python:** ruff and ty, and the test suite on Linux, macOS and Windows with Python 3.11 and
-  3.14, plus a run against the oldest supported Polars (1.28.0).
-* **Wheels:** abi3 wheels for Linux (x86_64 and aarch64, manylinux), Windows x64 and macOS
-  (x86_64 and arm64), plus an sdist. The test suite then runs against the *installed* wheels on
-  each native platform (including Intel macOS), and against a build from the sdist.
-* **Documentation:** a Sphinx build in which any warning, including a broken cross-reference, is an
-  error.
-
-Actions are pinned to commit SHAs and kept current by Dependabot (`.github/dependabot.yml`). The
-workflow passes [actionlint](https://github.com/rhysd/actionlint) and
-[zizmor](https://docs.zizmor.sh).
-
-**Releasing:**
-
-1. Bump `version` in `Cargo.toml`, and rename the `Unreleased` section of `CHANGELOG.md` to
-   `[X.Y.Z] - YYYY-MM-DD`.
-2. Push a tag `vX.Y.Z` with the same version.
-
-The workflow checks that the tag matches the version and that `CHANGELOG.md` has a dated section
-for it. It builds everything from scratch (no caches) and publishes to PyPI with trusted
-publishing and build-provenance attestations. It then creates the GitHub release, with that
-changelog section as its notes and the wheels and the sdist attached, and deploys the
-documentation to GitHub Pages. The published documentation therefore always describes the latest
-release.
-
-One-time setup:
-
-1. On PyPI, add a trusted publisher for the project `polars-xsum`: the GitHub owner and
-   repository, workflow `ci.yml`, environment `pypi`.
-2. In the GitHub repository settings, create the environment `pypi` (optionally with required
-   reviewers).
-3. In the GitHub repository settings, under *Pages*, set the source to *GitHub Actions*. This
-   creates the environment `github-pages`; allow deployments from tags `v*` in its deployment
-   rules (by default only the default branch may deploy).
-
-## Project layout
-
-```
-crates/xsum-core/     pure Rust library: the superaccumulators (no Polars dependency)
-  src/ieee.rs           IEEE-754 binary64 layout helpers
-  src/small.rs          small superaccumulator (67 × 32-bit digits in i64)
-  src/large.rs          large superaccumulator (4096 sign/exponent chunks, lanes)
-  src/round.rs          exact → f64 rounding (nearest-even, round-to-odd for f32)
-  src/parallel.rs       rayon fold/reduce over blocks
-  tests/                edge cases + proptest against a num-bigint oracle
-  benches/sum.rs        criterion benchmarks
-crates/polars-xsum/   the Polars plugin (cdylib): chunk/null handling, dtype checks
-python/polars_xsum/   Python API: `xsum(expr)`
-tests/                pytest suite with an exact `fractions.Fraction` oracle
-benchmarks/           Python-level benchmarks
-docs/                 Sphinx documentation (includes parts of README.md)
-.github/              CI workflow, Dependabot, release-notes script
-```
+* **Other dtypes**: integers, `Decimal` and `Float16` are rejected rather than converted
+  silently. Cast them explicitly, keeping in mind that integers beyond 2^53 are not exactly
+  representable as `Float64`.
+* **Weighted rolling sums**: `rolling_xsum` has no `weights` parameter.
+* **Other exact reductions**: there is no exact `sum_horizontal`, `cum_sum` or `mean`. A mean
+  computed as `xsum("x") / pl.col("x").count()` is rounded twice (the sum, then the division), so
+  it is within about one ulp of the exact mean, but not necessarily correctly rounded.
+* **Method syntax**: `xsum` is a function, not an expression namespace, so write `xsum("x")` or
+  `xsum(pl.col("x"))` rather than `pl.col("x").xsum()`.
 
 <!-- docs:internals -->
 
 ## How it works
 
-Every finite double is an integer multiple of `2^-1075`, so a sum of doubles is an integer times
-`2^-1075`. Neal's superaccumulators hold that integer exactly.
+Every finite double is an integer multiple of `2^-1074`, the smallest subnormal, so a sum of
+doubles is an integer times `2^-1074`. Neal's superaccumulators hold that integer exactly. They
+count in units of `2^-1075` (a double with biased exponent `e` and 53-bit significand `m` is
+`m · 2^(e − 1075)`, with `e` taken as 1 for subnormals), so that the exponent maps directly onto the digit positions.
 
 * **Small superaccumulator**: 67 signed 64-bit "digits", each holding 32 bits of the
   fixed-point number plus 31 bits of headroom. A double with exponent `e` is split into two pieces
@@ -225,13 +163,15 @@ Every finite double is an integer multiple of `2^-1075`, so a sum of doubles is 
   provably correctly rounded.
 * **Parallelism**: accumulators merge exactly, so long columns (≥ 32Ki values) are split into
   blocks that are summed on all cores with rayon. The result is bit-identical to the sequential
-  sum. Short columns (e.g. `group_by` groups) use the small accumulator.
+  sum. Columns and groups of fewer than 1,536 values use the small accumulator.
   Large accumulators are cleared and reused through a small per-thread cache (≤ 2 × 160 KiB per
   thread). This avoids paying allocation and page-fault costs on every call.
-* **No `unsafe`**: `xsum-core` is `#![forbid(unsafe_code)]`. In the plugin crate, the only unsafe
-  code is the FFI entry points that the `#[polars_expr]` macro generates.
+* **No `unsafe`**: `xsum-core` is `#![forbid(unsafe_code)]`. The plugin crate contains no
+  hand-written unsafe code; its only unsafe code is the FFI glue that the `#[polars_expr]`
+  (pyo3-polars) and `#[pymodule]`/`#[pyfunction]` (pyo3) macros generate.
 
-See [BENCHMARKS.md](BENCHMARKS.md) for performance measurements.
+See [Benchmarks](https://miraisolutions.github.io/polars-xsum/BENCHMARKS.html) for performance
+measurements.
 
 ## References
 
@@ -240,6 +180,11 @@ Radford M. Neal, *Fast exact summation using small and large superaccumulators*,
 
 <!-- docs:end -->
 
+## Contributing
+
+See [CONTRIBUTING.md](https://github.com/miraisolutions/polars-xsum/blob/main/CONTRIBUTING.md)
+for the development setup, tests, quality gates, continuous integration and the release process.
+
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/miraisolutions/polars-xsum/blob/main/LICENSE)
