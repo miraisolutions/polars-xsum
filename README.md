@@ -1,5 +1,12 @@
 # polars-xsum
 
+**[Documentation](https://miraisolutions.github.io/polars-xsum/)** ·
+[Changelog](CHANGELOG.md) ·
+[Benchmarks](BENCHMARKS.md)
+
+<!-- The docs/ pages include the sections between the "docs:" markers. -->
+<!-- docs:intro -->
+
 **Exact, correctly rounded summation of floating-point columns for [Polars](https://pola.rs).**
 
 `polars-xsum` is a Polars expression plugin that provides `xsum`, a drop-in replacement for
@@ -31,6 +38,19 @@ parallelised. `xsum` returns the exact sum rounded once to nearest (ties to even
 * **as accurate as possible**: the correctly rounded exact sum;
 * **deterministic**: independent of value order, chunking and thread count;
 * **robust**: intermediate overflow is impossible, so `[MAX, MAX, -MAX]` sums to `MAX`.
+
+## Installation
+
+```bash
+pip install polars-xsum    # or: uv add polars-xsum
+```
+
+Supported versions: Python ≥ 3.11 and Polars ≥ 1.28 (the full test suite passes from Polars 1.28.0
+to the latest release; CI checks both ends). Wheels are available for Linux (x86_64 and aarch64),
+Windows (x64) and macOS (x86_64 and arm64). On other platforms, `pip` builds the package from
+source, which requires Rust ≥ 1.95.
+
+<!-- docs:guide -->
 
 ## Semantics
 
@@ -89,11 +109,11 @@ The groups of a `group_by` or `over` are summed in parallel when they hold at le
 in total. Shorter inputs are summed on the calling Polars thread. The result is bit-identical for
 any number of threads.
 
-## Installation and development
+<!-- docs:development -->
 
-Supported versions: Python ≥ 3.11 and Polars ≥ 1.28 (the full test suite passes from Polars 1.28.0
-to the latest release; CI checks both ends). Building from source requires Rust ≥ 1.95 and
-[uv](https://docs.astral.sh/uv/).
+## Development
+
+Development requires Rust ≥ 1.95 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync                    # creates .venv and builds the extension (release mode)
@@ -101,7 +121,12 @@ uv run pytest              # Python test suite (incl. doctests and Hypothesis pr
 cargo test --workspace     # Rust unit, integration, property and doc tests
 cargo bench -p xsum-core   # criterion benchmarks (see BENCHMARKS.md)
 uv run python benchmarks/bench_polars.py
+uv run --group docs sphinx-build -W --keep-going -n docs docs/_build/html   # documentation
 ```
+
+The documentation (`docs/`) is built with Sphinx. Most of its text is included from this README,
+`BENCHMARKS.md` and `CHANGELOG.md`; the API reference comes from the docstrings. Open
+`docs/_build/html/index.html` to view it.
 
 After changing Rust code, `uv sync --reinstall-package polars-xsum` rebuilds the extension.
 `uv run` also rebuilds it automatically when sources change. `uv run maturin develop --release`
@@ -127,14 +152,25 @@ uv run ty check                                         # Astral's type checker
 * **Wheels:** abi3 wheels for Linux (x86_64 and aarch64, manylinux), Windows x64 and macOS
   (x86_64 and arm64), plus an sdist. The test suite then runs against the *installed* wheels on
   each native platform (including Intel macOS), and against a build from the sdist.
+* **Documentation:** a Sphinx build in which any warning, including a broken cross-reference, is an
+  error.
 
 Actions are pinned to commit SHAs and kept current by Dependabot (`.github/dependabot.yml`). The
 workflow passes [actionlint](https://github.com/rhysd/actionlint) and
 [zizmor](https://docs.zizmor.sh).
 
-**Releasing:** bump `version` in `Cargo.toml`, then push a tag `vX.Y.Z` with the same version. The
-workflow checks that the tag matches the version, builds everything from scratch (no caches) and
-publishes to PyPI with trusted publishing and build-provenance attestations.
+**Releasing:**
+
+1. Bump `version` in `Cargo.toml`, and rename the `Unreleased` section of `CHANGELOG.md` to
+   `[X.Y.Z] - YYYY-MM-DD`.
+2. Push a tag `vX.Y.Z` with the same version.
+
+The workflow checks that the tag matches the version and that `CHANGELOG.md` has a dated section
+for it. It builds everything from scratch (no caches) and publishes to PyPI with trusted
+publishing and build-provenance attestations. It then creates the GitHub release, with that
+changelog section as its notes and the wheels and the sdist attached, and deploys the
+documentation to GitHub Pages. The published documentation therefore always describes the latest
+release.
 
 One-time setup:
 
@@ -142,6 +178,9 @@ One-time setup:
    repository, workflow `ci.yml`, environment `pypi`.
 2. In the GitHub repository settings, create the environment `pypi` (optionally with required
    reviewers).
+3. In the GitHub repository settings, under *Pages*, set the source to *GitHub Actions*. This
+   creates the environment `github-pages`; allow deployments from tags `v*` in its deployment
+   rules (by default only the default branch may deploy).
 
 ## Project layout
 
@@ -158,7 +197,11 @@ crates/polars-xsum/   the Polars plugin (cdylib): chunk/null handling, dtype che
 python/polars_xsum/   Python API: `xsum(expr)`
 tests/                pytest suite with an exact `fractions.Fraction` oracle
 benchmarks/           Python-level benchmarks
+docs/                 Sphinx documentation (includes parts of README.md)
+.github/              CI workflow, Dependabot, release-notes script
 ```
+
+<!-- docs:internals -->
 
 ## How it works
 
@@ -194,6 +237,8 @@ See [BENCHMARKS.md](BENCHMARKS.md) for performance measurements.
 
 Radford M. Neal, *Fast exact summation using small and large superaccumulators*, 2015.
 [arXiv:1505.05571](https://arxiv.org/abs/1505.05571)
+
+<!-- docs:end -->
 
 ## License
 
