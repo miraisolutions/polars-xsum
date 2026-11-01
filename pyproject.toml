@@ -45,12 +45,17 @@ Changelog = "https://github.com/miraisolutions/polars-xsum/blob/main/CHANGELOG.m
 
 [dependency-groups]
 dev = [
-    "hypothesis>=6.100",
+    { include-group = "test" },
     "maturin>=1.9,<2",
-    "numpy>=2.0",
-    "pytest>=8.3",
     "ruff>=0.11",
     "ty>=0.0.93",
+]
+# What the test suite needs besides the package (CI installs it next to the
+# built wheels and the sdist).
+test = [
+    "hypothesis>=6.100",
+    "numpy>=2.0",
+    "pytest>=8.3",
 ]
 # Sphinx documentation (`uv run --group docs sphinx-build ...`, see README.md).
 docs = [

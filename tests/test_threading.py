@@ -119,6 +119,8 @@ def test_only_the_plugin_pool_is_started() -> None:
         text=True,
         check=True,
     )
-    new_threads = json.loads(result.stdout)
+    # jemalloc (Polars' allocator on Linux, e.g. in 1.28) starts its
+    # background thread lazily, so it may first appear here.
+    new_threads = [name for name in json.loads(result.stdout) if name != "jemalloc_bg_thd"]
     assert new_threads, "the plugin's pool should have been started"
     assert all(name.startswith("xsum-") for name in new_threads), new_threads

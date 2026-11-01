@@ -221,7 +221,7 @@ jobs:
         shell: bash
         run: |
           uv venv
-          uv pip install dist/*.whl pytest hypothesis
+          uv pip install dist/*.whl --group test
       # Run from the tests directory, so the installed wheel is imported
       # instead of the sources in python/.
       - name: Run the tests against the installed wheel
@@ -250,7 +250,7 @@ jobs:
         shell: bash
         run: |
           uv venv
-          uv pip install dist/*.tar.gz pytest hypothesis
+          uv pip install dist/*.tar.gz --group test
       # Run from the tests directory, so the installed package is imported
       # instead of the sources in python/.
       - name: Run the tests against the installed sdist build
