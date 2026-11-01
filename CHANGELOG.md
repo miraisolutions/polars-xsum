@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows
 link definitions at the bottom (see CONTRIBUTING.md). The release workflow refuses to publish a tag
 without such a section, and uses it as the notes of the GitHub release. -->
 
-## [Unreleased]
+## [0.1.0] - 2026-11-01
 
 First release.
 
@@ -27,4 +27,4 @@ First release.
 - abi3 wheels for Python ≥ 3.11 on Linux (x86_64 and aarch64), Windows (x64) and macOS (x86_64
   and arm64). Requires Polars ≥ 1.28.
 
-[Unreleased]: https://github.com/miraisolutions/polars-xsum/commits/main/
+[0.1.0]: https://github.com/miraisolutions/polars-xsum/releases/tag/v0.1.0
