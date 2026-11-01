@@ -158,7 +158,9 @@ def rolling_xsum(
       value entering the window is added, the value leaving it subtracted.
       The cost per row is therefore independent of the window size. Long
       columns are processed in parallel on the plugin's thread pool.
-    * In ``over(...)``, the windows stay within each group.
+    * In ``over(...)``, the windows stay within each group. The plugin is
+      then called once per group, so with many small groups the per-call
+      overhead dominates.
 
     Examples
     --------
@@ -242,6 +244,9 @@ def rolling_xsum_by(
       with a single exact accumulator, adding values that enter it and
       subtracting values that leave it, so the cost per row does not depend
       on the window size.
+    * In ``over(...)``, the windows stay within each group. The plugin is
+      then called once per group, so with many small groups the per-call
+      overhead dominates.
 
     Examples
     --------

@@ -13,10 +13,14 @@ use crate::{LargeAccumulator, SmallAccumulator, cache, exact_sum};
 /// determined by benchmarking).
 pub const PARALLEL_THRESHOLD: usize = 1 << 15;
 
-/// Bounds for the number of elements per parallel work item. Smaller blocks
-/// balance the load better, larger ones reduce scheduling overhead; `2^14`
-/// performed best in benchmarks for inputs large enough to use it.
+/// Lower bound for the number of elements per parallel work item (see
+/// [`block_len`]). Smaller blocks balance the load better, larger ones reduce
+/// scheduling overhead.
 const MIN_BLOCK_LEN: usize = 1 << 12;
+
+/// Upper bound for the number of elements per parallel work item (see
+/// [`block_len`]). `2^14` performed best in benchmarks for inputs large enough
+/// to use it.
 const MAX_BLOCK_LEN: usize = 1 << 14;
 
 /// Target number of rayon tasks per thread in [`par_sum_blocks`], and of
@@ -25,6 +29,9 @@ pub const TASKS_PER_THREAD: usize = 4;
 
 /// Returns the block length for summing `len` elements: about
 /// [`TASKS_PER_THREAD`] blocks per thread, clamped to `[2^12, 2^14]`.
+///
+/// The threads are those of the current rayon thread pool. Outside any pool,
+/// that is the global pool, which this starts if it is not running yet.
 #[must_use]
 pub fn block_len(len: usize) -> usize {
     (len / (TASKS_PER_THREAD * rayon::current_num_threads())).clamp(MIN_BLOCK_LEN, MAX_BLOCK_LEN)
@@ -56,7 +63,8 @@ pub fn par_sum_f32(values: &[f32]) -> f32 {
     par_exact_sum(values).to_f32()
 }
 
-/// Sums `values` exactly, in parallel if they are long enough.
+/// Returns the exact sum of `values`, computed in parallel if they are long
+/// enough.
 fn par_exact_sum<T: Copy + Into<f64> + Sync>(values: &[T]) -> SmallAccumulator {
     if values.len() < PARALLEL_THRESHOLD {
         return exact_sum(values);
@@ -66,16 +74,27 @@ fn par_exact_sum<T: Copy + Into<f64> + Sync>(values: &[T]) -> SmallAccumulator {
     })
 }
 
-/// Sums arbitrary work items in parallel.
+/// Sums the values of all work items exactly, in parallel.
 ///
-/// `feed` adds the values of one work item to an accumulator. Each rayon task
-/// owns one [`LargeAccumulator`] (taken from a per-thread cache) and
-/// processes a run of consecutive items, about [`TASKS_PER_THREAD`] tasks per
-/// thread. The partial sums are merged exactly at the end. The result does not
+/// Each rayon task owns one [`LargeAccumulator`] (taken from a per-thread
+/// cache) and processes a run of consecutive items, about
+/// [`TASKS_PER_THREAD`] tasks per thread. The partial sums are merged exactly at the end. The result does not
 /// depend on how rayon splits the work.
 ///
 /// This is the building block for summing data that is not a single slice,
 /// e.g. the chunks of a columnar array that may contain missing values.
+///
+/// # Arguments
+///
+/// * `items` - The work items, e.g. the blocks of a slice or the chunks of an
+///   array.
+/// * `feed` - Adds the values of one work item to an accumulator. It is called
+///   once per item, on any thread of the current rayon thread pool.
+///
+/// # Returns
+///
+/// The exact sum, unrounded: [`SmallAccumulator::to_f64`] or
+/// [`SmallAccumulator::to_f32`] rounds it.
 ///
 /// # Examples
 ///

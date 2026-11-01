@@ -18,20 +18,52 @@ dynamic = ["version"]
 dependencies = ["polars>=1.28"]
 keywords = ["polars", "plugin", "summation", "exact", "floating-point", "xsum"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
     "Topic :: Scientific/Engineering :: Mathematics",
     "Typing :: Typed",
 ]
 
+[project.urls]
+Documentation = "https://miraisolutions.github.io/polars-xsum/"
+Repository = "https://github.com/miraisolutions/polars-xsum"
+Issues = "https://github.com/miraisolutions/polars-xsum/issues"
+Changelog = "https://github.com/miraisolutions/polars-xsum/blob/main/CHANGELOG.md"
+
 [dependency-groups]
 dev = [
-    "hypothesis>=6.100",
+    { include-group = "test" },
     "maturin>=1.9,<2",
-    "numpy>=2.0",
-    "pytest>=8.3",
     "ruff>=0.11",
     "ty>=0.0.93",
+]
+# What the test suite needs besides the package (CI installs it next to the
+# built wheels and the sdist).
+test = [
+    "hypothesis>=6.100",
+    "numpy>=2.0",
+    "pytest>=8.3",
+]
+# Sphinx documentation (`uv run --group docs sphinx-build ...`, see README.md).
+docs = [
+    "myst-parser>=4",
+    "numpydoc>=1.8",
+    "pydata-sphinx-theme>=0.16",
+    "sphinx>=8",
+    "sphinx-copybutton>=0.5",
 ]
 
 [tool.maturin]
@@ -65,6 +97,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "PLR2004", "D", "INP001"]
 "benchmarks/**" = ["T201", "S311", "INP001", "PLR2004"]
+# Sphinx reads its settings from module-level names such as `copyright`.
+"docs/conf.py" = ["INP001", "A001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["polars_xsum"]

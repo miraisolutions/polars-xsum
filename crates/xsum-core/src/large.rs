@@ -58,6 +58,11 @@ type Table<T, const LANES: usize> = [[T; LANES]; NUM_CHUNKS];
 /// It falls back to an internal [`SmallAccumulator`] for the final carry
 /// handling and for infinities and NaNs.
 ///
+/// `LANES` is the number of independent chunks per sign and exponent.
+/// Consecutive values of a slice go to different lanes, so the CPU can overlap
+/// their updates even when they share an exponent. It must be between 1 and
+/// `2^16`; other values are rejected at compile time.
+///
 /// # Examples
 ///
 /// ```
@@ -91,6 +96,7 @@ struct ColdState {
 }
 
 impl ColdState {
+    /// The state of an empty accumulator: no chunk in use, a zero sum.
     const fn new() -> Self {
         Self {
             used: [0; USED_WORDS],
@@ -108,6 +114,7 @@ impl ColdState {
         newly_used
     }
 
+    /// Iterates over the chunk indices in use, in increasing order.
     fn used_indices(&self) -> impl Iterator<Item = usize> + '_ {
         used_indices(&self.used, self.used_summary)
     }
@@ -120,9 +127,14 @@ impl<const LANES: usize> Default for LargeAccumulator<LANES> {
 }
 
 impl<const LANES: usize> LargeAccumulator<LANES> {
+    /// Compile-time check of `LANES`, evaluated by [`new`](Self::new).
+    ///
+    /// The combined lanes of an index sum to less than `LANES · 2^64`, which
+    /// must stay below the `2^96` that [`SmallAccumulator`] accepts in one
+    /// transfer. The limit of `2^16` lanes leaves ample room.
     const LANES_IS_VALID: () = assert!(
         LANES > 0 && LANES <= 1 << 16,
-        "between 1 and 2^16 lanes (so the combined lanes stay below 2^96)"
+        "LargeAccumulator needs between 1 and 2^16 lanes"
     );
 
     /// Creates an accumulator representing an empty sum (zero).
@@ -137,6 +149,10 @@ impl<const LANES: usize> LargeAccumulator<LANES> {
     }
 
     /// Adds a single value.
+    ///
+    /// Single values always go to the first lane. To add many values,
+    /// [`add_slice`](Self::add_slice) is faster, as it spreads them over all
+    /// lanes.
     #[inline]
     pub fn add(&mut self, value: f64) {
         Self::add_in_lane(
@@ -214,7 +230,18 @@ impl<const LANES: usize> LargeAccumulator<LANES> {
         self.to_small().to_f32()
     }
 
-    /// The hot path: adds a value (given by its bits) to a chunk of `lane`.
+    /// The hot path: adds a value to its chunk in one lane.
+    ///
+    /// The accumulator's fields are passed separately so that the compiler
+    /// keeps the table pointers in registers.
+    ///
+    /// # Arguments
+    ///
+    /// * `chunks` - The accumulator's chunk sums.
+    /// * `remaining` - The accumulator's remaining chunk capacities.
+    /// * `cold` - The accumulator's state outside the hot path.
+    /// * `lane` - The lane to add to, below `LANES`.
+    /// * `bits` - The bit pattern of the value.
     #[inline]
     fn add_in_lane(
         chunks: &mut Table<u64, LANES>,
@@ -234,9 +261,10 @@ impl<const LANES: usize> LargeAccumulator<LANES> {
         }
     }
 
-    /// Handles specials, first use of a chunk index and full chunks. On entry,
-    /// the hot path has wrapped the chunk's remaining capacity from 0 to
-    /// `u16::MAX`.
+    /// The slow path of [`add_in_lane`](Self::add_in_lane), with the same
+    /// arguments: handles specials, first use of a chunk index and full chunks.
+    /// On entry, the hot path has wrapped the chunk's remaining capacity from 0
+    /// to `u16::MAX`.
     #[cold]
     #[inline(never)]
     fn add_in_lane_slow(

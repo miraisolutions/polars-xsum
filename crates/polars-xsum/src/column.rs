@@ -16,7 +16,9 @@ const MASK_BITS: usize = u64::BITS as usize;
 
 /// The common interface of the two superaccumulators used here.
 trait Accumulate {
+    /// Adds a single value.
     fn add(&mut self, value: f64);
+    /// Adds all values of a slice.
     fn add_slice<T: Copy + Into<f64>>(&mut self, values: &[T]);
 }
 
@@ -38,14 +40,30 @@ impl Accumulate for LargeAccumulator {
     }
 }
 
-/// Sums each list of `ca` exactly and rounds it with `round`. Null lists give
-/// null.
+/// Sums each list of `ca` exactly.
 ///
 /// This is how `xsum` sums the groups of `group_by` and `over`: there, the
 /// input is the imploded column, with one list per group, so a single plugin
 /// call covers all groups. Many lists are summed in parallel on the plugin's
 /// thread pool; a single long list (`select`) is split into blocks (see
 /// [`sum_range`]).
+///
+/// # Arguments
+///
+/// * `ca` - A list column with values of type `T`. Nulls inside the lists are
+///   skipped.
+/// * `round` - Rounds an exact sum to `T` (`SmallAccumulator::to_f32` or
+///   `SmallAccumulator::to_f64`).
+///
+/// # Returns
+///
+/// One sum per list, with the name of `ca`. A null list gives null, an empty
+/// one `+0.0`.
+///
+/// # Errors
+///
+/// Fails if the list values are not a primitive array of `T::Native`, which
+/// would mean that `T` does not match the dtype of `ca`.
 pub(crate) fn exact_list_sums<T>(
     ca: &ListChunked,
     round: impl Fn(&SmallAccumulator) -> T::Native + Sync,
@@ -97,8 +115,10 @@ where
     } else if len < PARALLEL_THRESHOLD {
         sum_with(|acc| add_range(acc, array, start, len))
     } else {
-        let block = block_len(len);
         pool::install(|| {
+            // Inside the pool, so that the blocks are sized for its threads
+            // (outside any pool, rayon would start its global pool).
+            let block = block_len(len);
             let blocks = (0..len).into_par_iter().step_by(block);
             par_sum_blocks(blocks, |acc, offset| {
                 add_range(acc, array, start + offset, block.min(len - offset));
@@ -124,7 +144,8 @@ where
     }
 }
 
-/// Adds the values whose validity bit is set, 64 values per mask word.
+/// Adds to `acc` the elements of `values` whose bit in `masks` is set, 64
+/// values per mask word.
 fn add_masked<T, A>(acc: &mut A, values: &[T], mut masks: BitChunks<'_, u64>)
 where
     T: Copy + Into<f64>,
@@ -137,7 +158,7 @@ where
     add_block(acc, remainder, masks.remainder());
 }
 
-/// Adds the values of `block` (at most 64) whose bit in `mask` is set.
+/// Adds to `acc` the values of `block` (at most 64) whose bit in `mask` is set.
 fn add_block<T, A>(acc: &mut A, block: &[T], mask: u64)
 where
     T: Copy + Into<f64>,

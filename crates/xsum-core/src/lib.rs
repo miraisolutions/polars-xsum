@@ -10,13 +10,17 @@
 //!
 //! * **correctly rounded**: the exact sum rounded to nearest, ties to even;
 //! * **independent of the summation order**, the chunking and the number of
-//!   threads;
+//!   threads (except for which NaN is returned when there are several, see
+//!   below);
 //! * **free of spurious overflow**: `[f64::MAX, f64::MAX, -f64::MAX]` sums to
 //!   `f64::MAX`.
 //!
 //! # Special values
 //!
-//! * Any NaN summand gives NaN: the first one, with its payload.
+//! * Any NaN summand gives NaN: the first one. For `f64` its payload is kept
+//!   exactly. For `f32` it is converted to `f64` and back, and Rust does not
+//!   guarantee that such conversions preserve the payload (signaling NaNs
+//!   are typically quieted).
 //! * Infinities of both signs give NaN.
 //! * Otherwise an infinite summand gives that infinity.
 //! * A finite exact sum beyond the range of the result type gives `±∞`.
@@ -26,7 +30,14 @@
 //!
 //! * [`sum_f64`] / [`sum_f32`] sum a slice on the current thread. They use a
 //!   [`SmallAccumulator`] for short inputs and a [`LargeAccumulator`] otherwise.
-//! * [`par_sum_f64`] / [`par_sum_f32`] (feature `parallel`, enabled by
+#![cfg_attr(
+    feature = "parallel",
+    doc = "* [`par_sum_f64`] / [`par_sum_f32`] (feature `parallel`, enabled by"
+)]
+#![cfg_attr(
+    not(feature = "parallel"),
+    doc = "* `par_sum_f64` / `par_sum_f32` (feature `parallel`, enabled by"
+)]
 //!   default) additionally spread long inputs over the rayon thread pool.
 //! * [`sum_with`] sums data that is not a single slice (e.g. several chunks)
 //!   with a reused, thread-local [`LargeAccumulator`].
@@ -98,8 +109,8 @@ pub fn sum_f32(values: &[f32]) -> f32 {
     exact_sum(values).to_f32()
 }
 
-/// Sums `values` exactly on the current thread, picking the accumulator by
-/// input length.
+/// Returns the exact sum of `values`, computed on the current thread with the
+/// accumulator suited to their number.
 pub(crate) fn exact_sum<T: Copy + Into<f64>>(values: &[T]) -> SmallAccumulator {
     if values.len() < SMALL_THRESHOLD {
         let mut acc = SmallAccumulator::new();

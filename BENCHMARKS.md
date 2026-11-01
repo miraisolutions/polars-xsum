@@ -48,6 +48,8 @@ Input: uniform `[0, 1)` unless noted. Throughput in values per second (higher is
 `naive` = `iter().sum()`, `neumaier` = compensated summation (both inexact),
 `small` / `large_lanesL` = the accumulators used directly, `sum_f64` = automatic choice,
 `par_sum_f64` = multi-threaded (24 threads), `par_naive` = `par_iter().sum()` (inexact).
+**Bold**: the fastest exact method of each row. At 10^4 values, `par_sum_f64` runs the same serial
+code as `sum_f64` (it parallelises from 32Ki values on).
 
 | n | naive | neumaier | small | large ×1 | large ×2 | large ×4 | large ×8 | `sum_f64` | `par_sum_f64` | par_naive |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -67,9 +69,9 @@ Observations:
   at 10^4 values (2.22 G vs 1.85 G).
 * **Hot path.** Adding a value to the large accumulator takes about 8 instructions: a
   decrement-and-branch on the chunk's remaining capacity and a read-modify-write of the chunk. The
-  loop is bound by op throughput and memory operations, not by latency. Counting up and testing
-  the range of the count, as before, took ~14 instructions per value (1.82 G values/s). A
-  count-free variant that accumulates significands and flushes all chunks every `2048 · LANES`
+  loop is bound by op throughput and memory operations, not by latency. An earlier design, which
+  counted up and tested the range of the count, took ~14 instructions per value (1.82 G
+  values/s). A count-free variant that accumulates significands and flushes all chunks every `2048 · LANES`
   values was at most ~10% faster on typical data. It was 3–4× slower on data with many zeros or
   with spread-out exponents, so it was not adopted.
 * **Lanes.** With one lane, consecutive values with the same exponent update the same memory word,
@@ -164,7 +166,8 @@ accumulator dominates.
 
 ### Accuracy
 
-Input: 10^6 values, formed as ±N(0, 10¹²) pairs plus 10,000 N(0, 1) values, shuffled. The exact sum
+Input: 5 · 10^5 values drawn from a normal distribution with σ = 10¹², together with their
+negatives, plus 10,000 values with σ = 1, shuffled (1.01 · 10^6 values). The exact sum
 is computed with `fractions.Fraction`.
 
 | method | result | relative error |
@@ -174,9 +177,9 @@ is computed with `fractions.Fraction`.
 | `math.fsum` | `-119.8196730748211` | 0 |
 | `xsum("x")` | `-119.8196730748211` | 0 |
 
-`math.fsum` is also correctly rounded, but it is 16× (10^4 values) to 280× (10^7 values) slower
-than `xsum` (see below). It also
-raises `OverflowError` on intermediate overflow, which `xsum` handles exactly.
+`math.fsum` is also correctly rounded, but it is 13× (10^4 values) to 270× (10^7 values) slower
+than `xsum` (see below). It also raises `OverflowError` on intermediate overflow, which `xsum`
+handles exactly.
 
 ### Whole-column sum, Float64 (normal data)
 
@@ -194,8 +197,8 @@ raises `OverflowError` on intermediate overflow, which `xsum` handles exactly.
   all groups of a `group_by` in one call.
 * Between 10^5 and 10^6 values, both Polars and the plugin spend much of their time waking their
   thread pools, so those rows vary noticeably from run to run.
-* From 10^7 values on, `xsum` runs at memory bandwidth, within a few percent of Polars' inexact
-  sum and faster than NumPy.
+* From 10^7 values on, `xsum` runs at memory bandwidth and is faster than NumPy. It is within
+  ~10% of Polars' inexact sum at 10^7 values and within a few percent at 10^8.
 
 ### Float32, nulls
 
@@ -230,8 +233,8 @@ much memory as the column. `rechunk()` the column once if it is summed repeatedl
 | 1,000,000 | sorted | 74.6 ms | 87.8 ms | 34.2 ms | 0.5× | 62.2 ms | 27.7 ms | 0.4× |
 
 `xsum` sums all groups in **one** plugin call: it is an elementwise list sum of the imploded
-column, so Polars hands it one list per group. Before, with one call per group, `xsum` took
-142 ms at 10^5 groups and ~810 ms at 10^6 groups (random keys), and ~720 ms at 10^6 groups with
+column, so Polars hands it one list per group. An earlier design, which called the plugin once
+per group, took 142 ms at 10^5 groups and ~810 ms at 10^6 groups (random keys), and ~720 ms at 10^6 groups with
 sorted keys.
 
 The remaining overhead is **not** the summation. Polars computes its built-in `sum` directly on the

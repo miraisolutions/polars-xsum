@@ -13,6 +13,7 @@ use rand_xoshiro::Xoshiro256PlusPlus;
 use rayon::prelude::*;
 use xsum_core::{LargeAccumulator, SmallAccumulator};
 
+/// Seed of the random number generator, so every run uses the same inputs.
 const SEED: u64 = 0x5EED;
 
 /// Benchmark input distributions.
@@ -29,8 +30,10 @@ enum Data {
 }
 
 impl Data {
+    /// All distributions, in the order they are reported.
     const ALL: [Self; 4] = [Self::Uniform, Self::Normal, Self::Wide, Self::Cancelling];
 
+    /// Returns `n` values drawn from this distribution.
     fn generate(self, n: usize) -> Vec<f64> {
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(SEED);
         match self {
@@ -87,12 +90,14 @@ fn neumaier_sum(values: &[f64]) -> f64 {
     sum + compensation
 }
 
+/// Exact sum with a [`SmallAccumulator`].
 fn small_sum(values: &[f64]) -> f64 {
     let mut acc = SmallAccumulator::new();
     acc.add_slice(values);
     acc.to_f64()
 }
 
+/// Exact sum with a [`LargeAccumulator`] with `LANES` lanes.
 fn large_sum<const LANES: usize>(values: &[f64]) -> f64 {
     let mut acc = LargeAccumulator::<LANES>::new();
     acc.add_slice(values);
@@ -109,6 +114,8 @@ fn sizes() -> Vec<usize> {
     (2..=max_exp).map(|e| 10_usize.pow(e)).collect()
 }
 
+/// Sets the throughput unit to `n` elements and adapts the sampling to the
+/// input size, so that large inputs do not take too long.
 fn configure(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     n: usize,

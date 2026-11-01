@@ -9,6 +9,8 @@ repository.workspace = true
 authors.workspace = true
 keywords = ["float", "summation", "exact", "superaccumulator", "xsum"]
 categories = ["mathematics", "algorithms"]
+# Used only by the Polars plugin for now, so not published to crates.io.
+publish = false
 
 [features]
 default = ["parallel"]
@@ -27,9 +29,19 @@ rand = "0.10"
 rand_distr = "0.6"
 rand_xoshiro = "0.8"
 
+# The integration tests and benchmarks compare against the parallel functions.
+[[test]]
+name = "edge_cases"
+required-features = ["parallel"]
+
+[[test]]
+name = "properties"
+required-features = ["parallel"]
+
 [[bench]]
 name = "sum"
 harness = false
+required-features = ["parallel"]
 
 [lints]
 workspace = true

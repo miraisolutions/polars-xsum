@@ -21,6 +21,7 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 /// Environment variable that overrides the pool size.
 const OVERRIDE_VAR: &str = "RAYON_NUM_THREADS";
 
+/// The plugin's thread pool, created on first use.
 static POOL: LazyLock<ThreadPool> = LazyLock::new(|| {
     let threads = pool_size(
         std::env::var(OVERRIDE_VAR).ok().as_deref(),
@@ -34,11 +35,19 @@ static POOL: LazyLock<ThreadPool> = LazyLock::new(|| {
 });
 
 /// Runs `op` inside the plugin's thread pool.
+///
+/// # Panics
+///
+/// Panics if the thread pool cannot be created (on first use).
 pub(crate) fn install<R: Send>(op: impl FnOnce() -> R + Send) -> R {
     POOL.install(op)
 }
 
 /// Number of threads in the plugin's thread pool (creating it if necessary).
+///
+/// # Panics
+///
+/// Panics if the thread pool cannot be created.
 pub(crate) fn size() -> usize {
     POOL.current_num_threads()
 }
